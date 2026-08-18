@@ -1,22 +1,50 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Clock, Bell, BellRing, ShieldCheck, ShieldAlert, Sparkles, Volume2, Moon, Sun, AlertTriangle } from 'lucide-react';
+import {
+  Clock,
+  Bell,
+  BellRing,
+  ShieldCheck,
+  ShieldAlert,
+  Sparkles,
+  Volume2,
+  Moon,
+  Sun,
+  AlertTriangle,
+  Sliders,
+  Check,
+  SunMedium
+} from 'lucide-react';
+import { supabase } from '@/lib/supabase';
 import { Settings } from '@/lib/types';
 
 interface AlarmClockProps {
   settings: Settings | null;
   onOpenSettings: () => void;
   onTriggerAlarm?: () => void;
+  onUpdateSettings?: (newSettings: Settings) => void;
 }
 
 // 1-second silent WAV base64 data URI for keeping mobile web audio context awake
 const SILENT_AUDIO_URI =
   'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
-export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmClockProps) {
+export function AlarmClock({
+  settings,
+  onOpenSettings,
+  onTriggerAlarm,
+  onUpdateSettings,
+}: AlarmClockProps) {
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [isArmed, setIsArmed] = useState(false);
+  const [isKeepScreenOn, setIsKeepScreenOn] = useState(false);
+  
+  // Local fast-synced settings state
+  const [alarmTime, setAlarmTime] = useState<string>('07:30');
+  const [isAlarmEnabled, setIsAlarmEnabled] = useState<boolean>(true);
+  const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
+
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const [wakeLockSupported, setWakeLockSupported] = useState(true);
   const [isAlarmRinging, setIsAlarmRinging] = useState(false);
@@ -26,7 +54,26 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastTriggeredMinuteRef = useRef<string | null>(null);
 
-  // Initialize clock and update every second
+  // Sync settings on prop change or localStorage cache
+  useEffect(() => {
+    if (settings) {
+      if (settings.alarm_time) setAlarmTime(settings.alarm_time);
+      if (settings.is_alarm_enabled !== undefined) setIsAlarmEnabled(settings.is_alarm_enabled);
+    } else if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('morning_oracle_alarm_settings');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed.alarm_time) setAlarmTime(parsed.alarm_time);
+          if (parsed.is_alarm_enabled !== undefined) setIsAlarmEnabled(parsed.is_alarm_enabled);
+        }
+      } catch (e) {
+        // ignore cache parse errors
+      }
+    }
+  }, [settings]);
+
+  // Real-time clock update (every 1 second)
   useEffect(() => {
     setCurrentTime(new Date());
     const timer = setInterval(() => {
@@ -55,7 +102,7 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
           setWakeLockActive(false);
         });
       } catch (err) {
-        console.warn('Wake Lock request failed:', err);
+        console.warn('[Morning Oracle] Wake Lock request failed:', err);
         setWakeLockActive(false);
       }
     }
@@ -68,23 +115,34 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
         await wakeLockRef.current.release();
         wakeLockRef.current = null;
       } catch (err) {
-        console.warn('Wake Lock release error:', err);
+        console.warn('[Morning Oracle] Wake Lock release error:', err);
       }
       setWakeLockActive(false);
     }
   }, []);
 
-  // Handle visibility changes to re-acquire wake lock if tab is refocused
+  // Keep Screen On / Nightstand mode toggle
+  const toggleKeepScreenOn = async () => {
+    const nextState = !isKeepScreenOn;
+    setIsKeepScreenOn(nextState);
+    if (nextState) {
+      await requestWakeLock();
+    } else if (!isArmed) {
+      await releaseWakeLock();
+    }
+  };
+
+  // Re-acquire wake lock on visibility change
   useEffect(() => {
     const handleVisibilityChange = async () => {
-      if (document.visibilityState === 'visible' && isArmed) {
+      if (document.visibilityState === 'visible' && (isArmed || isKeepScreenOn)) {
         await requestWakeLock();
-        if (audioRef.current && audioRef.current.paused) {
+        if (isArmed && audioRef.current && audioRef.current.paused) {
           try {
             await audioRef.current.play();
             setAudioLoopPlaying(true);
           } catch (e) {
-            console.warn('Audio resume error on visibility change:', e);
+            console.warn('[Morning Oracle] Audio resume error on visibility change:', e);
           }
         }
       }
@@ -94,7 +152,7 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [isArmed, requestWakeLock]);
+  }, [isArmed, isKeepScreenOn, requestWakeLock]);
 
   // Handle Arm/Disarm toggle
   const toggleArm = async () => {
@@ -109,7 +167,7 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
           await audioRef.current.play();
           setAudioLoopPlaying(true);
         } catch (err) {
-          console.warn('Silent audio play blocked by browser policy:', err);
+          console.warn('[Morning Oracle] Silent audio play blocked by browser policy:', err);
           setAudioLoopPlaying(false);
         }
       }
@@ -117,7 +175,9 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
       // Disarm alarm
       setIsArmed(false);
       setIsAlarmRinging(false);
-      await releaseWakeLock();
+      if (!isKeepScreenOn) {
+        await releaseWakeLock();
+      }
 
       if (audioRef.current) {
         audioRef.current.pause();
@@ -127,9 +187,54 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
     }
   };
 
-  // Alarm matching check loop
+  // Live save for inline alarm time and enabled state
+  const handleSaveAlarmTime = async (newTime: string, newEnabled: boolean) => {
+    setAlarmTime(newTime);
+    setIsAlarmEnabled(newEnabled);
+    setIsSavingSettings(true);
+
+    // Save to localStorage for instant load
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(
+          'morning_oracle_alarm_settings',
+          JSON.stringify({ alarm_time: newTime, is_alarm_enabled: newEnabled })
+        );
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Save to Supabase settings table
+    try {
+      const payload: Partial<Settings> = {
+        alarm_time: newTime,
+        is_alarm_enabled: newEnabled,
+        updated_at: new Date().toISOString(),
+      };
+
+      let updatedRecord: any = null;
+      if (settings?.id) {
+        const res = await supabase.from('settings').update(payload).eq('id', settings.id).select().single();
+        updatedRecord = res.data;
+      } else {
+        const res = await supabase.from('settings').insert([payload]).select().single();
+        updatedRecord = res.data;
+      }
+
+      if (onUpdateSettings && updatedRecord) {
+        onUpdateSettings(updatedRecord as Settings);
+      }
+    } catch (err) {
+      console.error('[Morning Oracle] Error saving alarm time to Supabase:', err);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  // Live Alarm Trigger Engine (checked every second)
   useEffect(() => {
-    if (!currentTime || !isArmed || !settings?.alarm_time || !settings?.is_alarm_enabled) {
+    if (!currentTime || !isAlarmEnabled) {
       return;
     }
 
@@ -138,17 +243,19 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
     const seconds = currentTime.getSeconds();
     const currentHM = `${hours}:${minutes}`;
 
-    // Target alarm time in "HH:MM" format
-    const targetHM = settings.alarm_time;
+    // Target alarm time in "HH:MM"
+    const targetHM = alarmTime;
 
-    if (currentHM === targetHM && seconds === 0 && lastTriggeredMinuteRef.current !== currentHM) {
+    // Trigger only on match, at 0-2 seconds, and once per minute
+    if (currentHM === targetHM && seconds <= 2 && lastTriggeredMinuteRef.current !== currentHM) {
       lastTriggeredMinuteRef.current = currentHM;
+      console.log(`[Morning Oracle] Alarm triggered at ${currentHM}:${seconds}! Launching Morning Routine...`);
       setIsAlarmRinging(true);
       if (onTriggerAlarm) {
         onTriggerAlarm();
       }
     }
-  }, [currentTime, isArmed, settings, onTriggerAlarm]);
+  }, [currentTime, isAlarmEnabled, alarmTime, onTriggerAlarm]);
 
   // Format time display
   const hoursStr = currentTime ? String(currentTime.getHours()).padStart(2, '0') : '--';
@@ -164,9 +271,6 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
       })
     : 'Loading date...';
 
-  const alarmTarget = settings?.alarm_time || '07:30';
-  const isAlarmEnabledInSettings = settings?.is_alarm_enabled ?? true;
-
   return (
     <section className="w-full max-w-md mx-auto p-4 space-y-5">
       {/* Hidden audio element for continuous silent playback loop */}
@@ -178,7 +282,7 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
         className="hidden"
       />
 
-      {/* Main Clock Card */}
+      {/* Main Real-Time Clock Card */}
       <div className="glass-card rounded-3xl p-6 border border-oracle-border relative overflow-hidden shadow-2xl flex flex-col items-center justify-center text-center">
         {/* Glow ambient background */}
         <div
@@ -186,7 +290,7 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
             isAlarmRinging
               ? 'bg-oracle-magenta/30 opacity-100 animate-pulse'
               : isArmed
-              ? 'bg-oracle-cyan/20 opacity-100'
+              ? 'bg-oracle-cyan/25 opacity-100'
               : 'bg-oracle-cyan/5 opacity-40'
           }`}
         />
@@ -225,27 +329,34 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
           </div>
         )}
 
-        {/* Target Alarm Info */}
-        <div className="w-full mt-6 pt-4 border-t border-oracle-border/60 flex items-center justify-between text-xs">
+        {/* Quick Alarm Time Adjuster & Target */}
+        <div className="w-full mt-5 pt-4 border-t border-oracle-border/60 flex items-center justify-between">
           <div className="flex items-center space-x-2">
-            <Bell className={`w-4 h-4 ${isArmed ? 'text-oracle-cyan' : 'text-oracle-muted'}`} />
-            <span className="text-oracle-muted">Target Alarm:</span>
-            <span className="font-mono font-bold text-white tracking-wider">
-              {alarmTarget}
-            </span>
+            <Bell className={`w-4 h-4 ${isAlarmEnabled ? 'text-oracle-cyan' : 'text-oracle-muted'}`} />
+            <span className="text-xs text-oracle-muted">Alarm Time:</span>
+            <input
+              type="time"
+              value={alarmTime}
+              onChange={(e) => handleSaveAlarmTime(e.target.value, isAlarmEnabled)}
+              className="bg-oracle-dark/90 border border-oracle-border hover:border-oracle-cyan/60 rounded-lg px-2 py-0.5 text-xs font-mono font-bold text-oracle-cyan outline-none transition cursor-pointer"
+            />
           </div>
 
-          <button
-            onClick={onOpenSettings}
-            className="text-[11px] text-oracle-cyan hover:underline font-mono"
-          >
-            Change
-          </button>
+          <label className="flex items-center cursor-pointer space-x-1.5 text-xs">
+            <span className="text-[11px] text-oracle-muted">Active</span>
+            <input
+              type="checkbox"
+              checked={isAlarmEnabled}
+              onChange={(e) => handleSaveAlarmTime(alarmTime, e.target.checked)}
+              className="w-4 h-4 accent-oracle-cyan rounded cursor-pointer"
+            />
+          </label>
         </div>
       </div>
 
-      {/* Arm / Keep-Awake Toggle Card */}
+      {/* Arm / Nightstand Mode Controls Card */}
       <div className="glass-card rounded-2xl p-5 border border-oracle-border space-y-4">
+        {/* Toggle 1: Arm Alarm & Keep Awake (Silent Loop + WakeLock) */}
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div
@@ -259,23 +370,22 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
             </div>
             <div>
               <h3 className="text-sm font-bold text-white tracking-wide">
-                {isArmed ? 'Alarm Armed & Awake' : 'Alarm Standby'}
+                {isArmed ? 'Alarm Armed & Active' : 'Arm Alarm'}
               </h3>
               <p className="text-[11px] text-oracle-muted">
                 {isArmed
-                  ? 'Screen WakeLock & Silent Audio active'
-                  : 'Arm to prevent phone from sleeping'}
+                  ? 'Silent Audio Loop & WakeLock armed'
+                  : 'Arm to ensure phone browser does not sleep'}
               </p>
             </div>
           </div>
 
-          {/* Toggle Switch */}
           <button
             onClick={toggleArm}
-            disabled={!isAlarmEnabledInSettings}
+            disabled={!isAlarmEnabled}
             className={`relative inline-flex h-7 w-14 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
               isArmed ? 'bg-oracle-cyan' : 'bg-oracle-border'
-            } ${!isAlarmEnabledInSettings ? 'opacity-40 cursor-not-allowed' : ''}`}
+            } ${!isAlarmEnabled ? 'opacity-40 cursor-not-allowed' : ''}`}
             role="switch"
             aria-checked={isArmed}
           >
@@ -287,16 +397,42 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
           </button>
         </div>
 
-        {/* Warning if alarm is disabled in settings */}
-        {!isAlarmEnabledInSettings && (
-          <div className="p-2.5 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-xs flex items-center space-x-2">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>Alarm is disabled in Settings. Enable it to arm.</span>
+        {/* Toggle 2: Keep Screen On (Nightstand Mode) */}
+        <div className="pt-3 border-t border-oracle-border/40 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center border transition-all ${
+                isKeepScreenOn || wakeLockActive
+                  ? 'bg-oracle-cyan/15 border-oracle-cyan/50 text-oracle-cyan'
+                  : 'bg-oracle-card border-oracle-border text-oracle-muted'
+              }`}
+            >
+              <SunMedium className="w-4 h-4" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-white">Keep Screen On (Nightstand)</h4>
+              <p className="text-[10px] text-oracle-muted">Prevent display from sleeping all night</p>
+            </div>
           </div>
-        )}
 
-        {/* Live Diagnostics Badges */}
-        <div className="pt-2 border-t border-oracle-border/40 grid grid-cols-2 gap-2 text-[10px] font-mono">
+          <button
+            onClick={toggleKeepScreenOn}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+              isKeepScreenOn ? 'bg-oracle-cyan' : 'bg-oracle-border'
+            }`}
+            role="switch"
+            aria-checked={isKeepScreenOn}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-oracle-dark shadow-lg ring-0 transition duration-200 ease-in-out ${
+                isKeepScreenOn ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Diagnostics Info */}
+        <div className="pt-3 border-t border-oracle-border/40 grid grid-cols-2 gap-2 text-[10px] font-mono">
           <div className="flex items-center space-x-1.5 text-oracle-muted bg-oracle-dark/60 px-2.5 py-1.5 rounded-lg border border-oracle-border/40">
             <span
               className={`w-2 h-2 rounded-full ${
@@ -308,12 +444,12 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
 
           <div className="flex items-center space-x-1.5 text-oracle-muted bg-oracle-dark/60 px-2.5 py-1.5 rounded-lg border border-oracle-border/40">
             <Volume2 className={`w-3 h-3 ${audioLoopPlaying ? 'text-oracle-cyan' : 'text-gray-600'}`} />
-            <span>Audio Loop: {audioLoopPlaying ? 'Playing' : 'Idle'}</span>
+            <span>Audio Loop: {audioLoopPlaying ? 'Active' : 'Idle'}</span>
           </div>
         </div>
       </div>
 
-      {/* Quick Test Trigger Button for Developer/User convenience */}
+      {/* Manual Test Trigger */}
       <div className="flex justify-center pt-1">
         <button
           onClick={() => {
@@ -323,7 +459,7 @@ export function AlarmClock({ settings, onOpenSettings, onTriggerAlarm }: AlarmCl
           className="text-[11px] text-oracle-muted hover:text-oracle-cyan font-mono transition flex items-center space-x-1"
         >
           <Sparkles className="w-3 h-3" />
-          <span>Test Alarm Trigger</span>
+          <span>Test Live Alarm Trigger</span>
         </button>
       </div>
     </section>

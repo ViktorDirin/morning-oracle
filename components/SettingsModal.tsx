@@ -39,6 +39,22 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
 
   const loadSettings = async () => {
     setIsLoading(true);
+
+    // Fast load from localStorage cache first
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('morning_oracle_settings_cache');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed.alarm_time) setAlarmTime(parsed.alarm_time);
+          if (parsed.is_alarm_enabled !== undefined) setIsAlarmEnabled(parsed.is_alarm_enabled);
+          if (parsed.news_topics) setSelectedTopics(parsed.news_topics);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
     try {
       const { data, error } = await supabase
         .from('settings')
@@ -55,9 +71,14 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
         setAlarmTime(data.alarm_time || '07:30');
         setIsAlarmEnabled(data.is_alarm_enabled ?? true);
         setSelectedTopics(data.news_topics || ['technology', 'world', 'ai']);
+
+        // Update local cache
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('morning_oracle_settings_cache', JSON.stringify(data));
+        }
       }
     } catch (err: any) {
-      console.error('Failed to load settings:', err);
+      console.error('[Morning Oracle] Failed to load settings from Supabase:', err);
     } finally {
       setIsLoading(false);
     }
@@ -99,17 +120,23 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
 
       if (error) throw error;
 
-      if (onSettingsSaved && updatedData) {
-        onSettingsSaved(updatedData as Settings);
+      // Update localStorage caches
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('morning_oracle_settings_cache', JSON.stringify(updatedData || payload));
+        localStorage.setItem('morning_oracle_alarm_settings', JSON.stringify({ alarm_time: alarmTime, is_alarm_enabled: isAlarmEnabled }));
+      }
+
+      if (onSettingsSaved && (updatedData || payload)) {
+        onSettingsSaved((updatedData || payload) as Settings);
       }
 
       setStatus({ type: 'success', message: 'Settings saved successfully!' });
       setTimeout(() => {
         setStatus(null);
         onClose();
-      }, 1200);
+      }, 1000);
     } catch (err: any) {
-      console.error('Failed to save settings:', err);
+      console.error('[Morning Oracle] Failed to save settings:', err);
       setStatus({ type: 'error', message: err.message || 'Failed to save settings' });
     } finally {
       setIsSaving(false);

@@ -42,6 +42,18 @@ export default function Home() {
 
   // Fetch Settings from Supabase
   const fetchSettings = useCallback(async () => {
+    // Check local cache first for instant UI response
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('morning_oracle_settings_cache');
+        if (cached) {
+          setSettings(JSON.parse(cached));
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
     try {
       const { data, error } = await supabase
         .from('settings')
@@ -53,6 +65,9 @@ export default function Home() {
         console.error('Error fetching settings:', error);
       } else if (data) {
         setSettings(data as Settings);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('morning_oracle_settings_cache', JSON.stringify(data));
+        }
       }
     } catch (err) {
       console.error('Failed to fetch Supabase settings:', err);
@@ -173,6 +188,7 @@ export default function Home() {
               settings={settings}
               onOpenSettings={() => setIsSettingsOpen(true)}
               onTriggerAlarm={handleAlarmTriggered}
+              onUpdateSettings={(newSettings) => setSettings(newSettings)}
             />
 
             {/* Quick manual preview button */}

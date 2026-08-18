@@ -1,22 +1,30 @@
 {
-  "name": "Morning Oracle",
-  "short_name": "Oracle",
-  "description": "AI Voice Assistant & Smart Morning Alarm",
+  "name": "Morning Oracle - AI Alarm Assistant",
+  "short_name": "Morning Oracle",
+  "description": "Capture daily ideas by voice and wake up to a personalized morning AI audio broadcast.",
   "start_url": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "portrait",
   "background_color": "#0a0a0a",
-  "theme_color": "#0a0a0a",
+  "theme_color": "#00E5FF",
   "icons": [
     {
-      "src": "/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png"
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
     },
     {
-      "src": "/icon-512.png",
+      "src": "/icon.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/svg+xml",
+      "purpose": "any"
     }
   ]
 }
