@@ -66,7 +66,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     }
   }, []);
 
-  // Cleanup helper to abort and detach any existing instance
+  // Cleanup helper to cleanly abort and detach any existing instance
   const cleanupRecognition = useCallback(() => {
     if (recognitionRef.current) {
       try {
@@ -102,8 +102,8 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     }
   }, [transcript, interimText, formatTextWithAI]);
 
-  // Start listening session optimized for Android Chrome & Desktop
-  const startListening = useCallback(async () => {
+  // Start fresh listening session (native SpeechRecognition request without getUserMedia conflicts)
+  const startListening = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
@@ -119,30 +119,13 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     setInterimText('');
     isExplicitStopRef.current = false;
 
-    // Explicit audio permission warm-up for mobile Android
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((track) => track.stop());
-      } catch (err: any) {
-        console.warn('[Morning Oracle] getUserMedia permission check rejected:', err);
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          setStatusMessage({
-            type: 'error',
-            text: 'Microphone permission is required. Please allow microphone access in your browser settings.',
-          });
-          return;
-        }
-      }
-    }
-
-    // Clean up previous instance
+    // Clean up any previous instance before starting fresh
     cleanupRecognition();
 
     try {
       const recognition = new SpeechRecognition();
-      
-      // Configuration for high stability on Android Chrome / Pixel:
+
+      // Touch-to-talk configuration for Android Chrome & Desktop:
       recognition.continuous = false;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
@@ -183,24 +166,31 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       };
 
       recognition.onerror = (event: any) => {
-        console.warn('[Morning Oracle] Speech recognition error event:', event.error);
-        
+        console.log('[Morning Oracle] Speech recognition error/notice:', event.error);
+
+        // Completely ignore benign non-critical errors (aborted, no-speech)
+        if (event.error === 'aborted' || event.error === 'no-speech') {
+          return;
+        }
+
+        // Only alert on critical failures
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
           setIsListening(false);
           setStatusMessage({
             type: 'error',
-            text: 'Microphone permission is required. Please grant microphone access in your browser settings.',
+            text: 'Microphone permission is required. Please allow access in browser settings.',
           });
-        } else if (event.error === 'no-speech') {
-          // Gracefully ignore no-speech timeouts on mobile
-          console.log('[Morning Oracle] No speech detected.');
-        } else if (event.error === 'aborted') {
-          // Silent handling for manual stops
-        } else {
+        } else if (event.error === 'audio-capture') {
           setIsListening(false);
           setStatusMessage({
             type: 'error',
-            text: `Speech recognition notice: ${event.error}`,
+            text: 'Microphone is unavailable or in use by another application.',
+          });
+        } else if (event.error === 'network') {
+          setIsListening(false);
+          setStatusMessage({
+            type: 'error',
+            text: 'Speech recognition network issue. Please check your connection.',
           });
         }
       };
@@ -210,7 +200,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         setIsListening(false);
         setInterimText('');
 
-        // Trigger AI formatting automatically after utterance concludes
+        // Trigger AI formatting automatically after utterance ends naturally
         if (!isExplicitStopRef.current && accumulatedTextRef.current) {
           formatTextWithAI(accumulatedTextRef.current);
         }
@@ -221,10 +211,13 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     } catch (err: any) {
       console.error('[Morning Oracle] Exception starting SpeechRecognition:', err);
       setIsListening(false);
-      setStatusMessage({
-        type: 'error',
-        text: 'Failed to start voice capture. Please check microphone permissions or type below.',
-      });
+      // Suppress noisy startup aborts
+      if (err.name !== 'AbortError') {
+        setStatusMessage({
+          type: 'error',
+          text: 'Failed to start voice capture. Please check microphone permissions or type below.',
+        });
+      }
     }
   }, [selectedLang, cleanupRecognition, formatTextWithAI]);
 
