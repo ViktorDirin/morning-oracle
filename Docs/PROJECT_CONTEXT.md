@@ -66,3 +66,27 @@
   - `SUPABASE_URL`
   - `SUPABASE_SERVICE_ROLE_KEY`
   - `GEMINI_API_KEY`
+  
+  Please append the following completed milestones to `PROJECT_CONTEXT.md` under a new section "## Changelog / Recent Updates (v1.1)":
+
+### Morning Oracle v1.1 Updates
+- **Autonomous Backend & Cron Generation**:
+  - Standalone cron worker located at `/opt/morning_oracle_api/cron_worker.py` on the Oracle Cloud server.
+  - Aggregates tech/AI RSS feeds (VentureBeat, TechCrunch, Hacker News, The Verge) and Open-Meteo weather API.
+  - Generates scripts via `gemini-3.6-flash` with strict filters against conflict/war topics.
+  - Synthesizes dual-language audio via Edge-TTS (`ru-RU-SvetlanaNeural` and `en-US-JennyNeural`).
+  - Auto-uploads generated `today_news.mp3` (RU) and `today_news_en.mp3` (EN) directly to Supabase Storage bucket `morning_audio`.
+  - Scheduled daily via Ubuntu system crontab (`0 6 * * *`).
+
+- **AI Voice & Capture Polish**:
+  - Implemented Next.js App Router API route `/api/format-idea` using direct Google Gemini REST API (`gemini-3.6-flash`).
+  - Automatically formats raw transcribed text with proper capitalization, punctuation, and typo cleanup without changing the language.
+  - Added dedicated "AI Fix" manual trigger button in the capture UI.
+  - Streamlined speech capture language selector to `EN` and `RU` (defaulting cleanly with localStorage persistence).
+  - Suppressed transient `aborted` / `no-speech` mobile browser error toasts for seamless Android Chrome / Pixel recording.
+
+- **Audio Playback & Task Flow Enhancements**:
+  - Added "Morning Digest Language" selector (`RU` / `EN`) in `SettingsModal.tsx` synced to `localStorage` (`'oracle_digest_lang'`).
+  - `MorningPlayer.tsx` dynamically switches between `today_news.mp3` and `today_news_en.mp3`.
+  - Stage 3 (Task Readout) intro revised to direct prompt ("Твой список задач." / "Your task list.").
+  - Added structured sequential speech cadence with ~500ms intervals and live UI task card highlighting.

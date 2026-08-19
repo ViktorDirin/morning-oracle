@@ -9,19 +9,18 @@ export async function POST(req: NextRequest) {
     }
 
     const rawText = text.trim();
-    const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
-      console.warn('[Morning Oracle] GEMINI_API_KEY is not defined. Returning raw text.');
+      console.warn('[Morning Oracle Server] GEMINI_API_KEY environment variable is not defined. Returning raw text.');
       return NextResponse.json({ formattedText: rawText }, { status: 200 });
     }
 
-    const systemPrompt =
-      "You are a fast punctuation and formatting assistant. Take the user's raw transcribed speech, fix capitalization, insert proper punctuation (periods, commas, question marks), fix obvious speech-to-text typos, and keep the exact original language (Russian, English, or Ukrainian). Return ONLY the cleaned text, without any explanations, quotes, or markdown.";
+    const promptText = `You are an expert voice transcription punctuation and formatting assistant. Take the user's raw transcribed text, correct capitalization, add appropriate punctuation (periods, commas, question marks), and fix obvious speech recognition typos. Keep the exact original meaning and language. Return ONLY the cleaned text, without quotes, backticks, or extra commentary.\n\nInput text:\n${rawText}`;
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
 
-    const response = await fetch(apiUrl, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -31,28 +30,20 @@ export async function POST(req: NextRequest) {
           {
             parts: [
               {
-                text: `Raw transcription: "${rawText}"`,
+                text: promptText,
               },
             ],
           },
         ],
-        systemInstruction: {
-          parts: [
-            {
-              text: systemPrompt,
-            },
-          ],
-        },
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 300,
         },
       }),
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.warn('[Morning Oracle] Gemini API error response:', response.status, errorText);
+      const errorPayload = await response.text();
+      console.error('Gemini API Error:', errorPayload);
       return NextResponse.json({ formattedText: rawText }, { status: 200 });
     }
 
@@ -60,13 +51,12 @@ export async function POST(req: NextRequest) {
     const candidateText =
       data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || rawText;
 
-    // Clean any surrounding quotes if generated
-    const cleanedText = candidateText.replace(/^["']|["']$/g, '').trim();
+    // Strip any accidental markdown formatting or quotes
+    const cleanedText = candidateText.replace(/^["'`]|["'`]$/g, '').trim();
 
     return NextResponse.json({ formattedText: cleanedText || rawText }, { status: 200 });
   } catch (error: any) {
-    console.error('[Morning Oracle] Error in /api/format-idea:', error);
-    // Graceful fallback to raw text
+    console.error('Gemini API Error (Exception):', error);
     return NextResponse.json({ formattedText: '' }, { status: 200 });
   }
 }

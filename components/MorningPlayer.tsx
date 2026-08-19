@@ -1,7 +1,20 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Pause, SkipForward, SkipBack, X, Volume2, Sparkles, CheckCircle, Radio, ListTodo, Music } from 'lucide-react';
+import {
+  Play,
+  Pause,
+  SkipForward,
+  SkipBack,
+  X,
+  Volume2,
+  Sparkles,
+  CheckCircle,
+  Radio,
+  ListTodo,
+  Music,
+  Globe
+} from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Idea, Settings } from '@/lib/types';
 
@@ -20,8 +33,10 @@ interface BroadcastTrack {
   estimatedDuration: number;
 }
 
-const REMOTE_NEWS_AUDIO_BASE =
+const REMOTE_NEWS_AUDIO_RU =
   'https://ignakecyqbkwznubymue.supabase.co/storage/v1/object/public/morning_audio/today_news.mp3';
+const REMOTE_NEWS_AUDIO_EN =
+  'https://ignakecyqbkwznubymue.supabase.co/storage/v1/object/public/morning_audio/today_news_en.mp3';
 
 const TOPIC_NAMES_RU: Record<string, string> = {
   technology: 'технологии',
@@ -31,6 +46,16 @@ const TOPIC_NAMES_RU: Record<string, string> = {
   science: 'наука и космос',
   crypto: 'криптовалюты',
   startups: 'стартапы и бизнес',
+};
+
+const TOPIC_NAMES_EN: Record<string, string> = {
+  technology: 'technology',
+  ai: 'artificial intelligence',
+  finance: 'finance & markets',
+  world: 'world news',
+  science: 'science & space',
+  crypto: 'crypto & web3',
+  startups: 'startups & business',
 };
 
 // Generate an exact 5-second in-memory audio WAV chime sequence
@@ -114,7 +139,9 @@ export function MorningPlayer({
   const [progress, setProgress] = useState(0);
   const [track2Duration, setTrack2Duration] = useState(25);
   const [isCompleted, setIsCompleted] = useState(false);
-  
+  const [activeTaskIndex, setActiveTaskIndex] = useState<number | null>(null);
+  const [digestLang, setDigestLang] = useState<'ru' | 'en'>('ru');
+
   const [chimeAudioUrl, setChimeAudioUrl] = useState<string>('');
   const [liveTomorrowTasks, setLiveTomorrowTasks] = useState<Idea[]>([]);
 
@@ -122,14 +149,46 @@ export function MorningPlayer({
   const chimeAudioRef = useRef<HTMLAudioElement | null>(null);
   const newsAudioRef = useRef<HTMLAudioElement | null>(null);
   const progressTimerRef = useRef<any>(null);
-  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const isTaskSpeechAbortedRef = useRef(false);
   const wasOpenRef = useRef(false);
+
+  // Read language preference from localStorage
+  const refreshDigestLang = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const savedLang = localStorage.getItem('oracle_digest_lang');
+        if (savedLang === 'en' || savedLang === 'ru') {
+          setDigestLang(savedLang);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshDigestLang();
+
+    const handleLangChange = () => {
+      refreshDigestLang();
+    };
+
+    window.addEventListener('oracle_digest_lang_changed', handleLangChange);
+    return () => {
+      window.removeEventListener('oracle_digest_lang_changed', handleLangChange);
+    };
+  }, [refreshDigestLang]);
 
   // Live tasks array reference
   const tasksToSpeakRef = useRef<Idea[]>([]);
-  tasksToSpeakRef.current = liveTomorrowTasks.length > 0 ? liveTomorrowTasks : ideas.filter((i) => i.status === 'tomorrow');
+  tasksToSpeakRef.current =
+    liveTomorrowTasks.length > 0 ? liveTomorrowTasks : ideas.filter((i) => i.status === 'tomorrow');
 
   const newsTopics = settings?.news_topics || ['technology', 'ai', 'world'];
+  const topicsFormatted =
+    digestLang === 'en'
+      ? newsTopics.map((t) => TOPIC_NAMES_EN[t] || t).join(', ')
+      : newsTopics.map((t) => TOPIC_NAMES_RU[t] || t).join(', ');
 
   const tracks: BroadcastTrack[] = [
     {
@@ -141,7 +200,7 @@ export function MorningPlayer({
     },
     {
       id: 'track-2',
-      title: `AI News Briefing (${newsTopics.map((t) => TOPIC_NAMES_RU[t] || t).join(', ')})`,
+      title: `AI News Briefing [${digestLang.toUpperCase()}] (${topicsFormatted})`,
       category: 'AI News Briefing',
       iconType: 'radio',
       estimatedDuration: track2Duration,
@@ -151,7 +210,7 @@ export function MorningPlayer({
       title: `${tasksToSpeakRef.current.length > 0 ? tasksToSpeakRef.current.length : '0'} Priority Items for Today`,
       category: "Today's Tasks Breakdown",
       iconType: 'tasks',
-      estimatedDuration: tasksToSpeakRef.current.length > 0 ? Math.max(10, tasksToSpeakRef.current.length * 5) : 8,
+      estimatedDuration: tasksToSpeakRef.current.length > 0 ? Math.max(12, tasksToSpeakRef.current.length * 6) : 6,
     },
   ];
 
@@ -185,8 +244,11 @@ export function MorningPlayer({
     };
   }, []);
 
-  // Stop all active audio elements and speech
+  // Stop all active audio elements and speech synthesis
   const stopCurrentAudio = useCallback(() => {
+    isTaskSpeechAbortedRef.current = true;
+    setActiveTaskIndex(null);
+
     if (progressTimerRef.current) {
       clearInterval(progressTimerRef.current);
       progressTimerRef.current = null;
@@ -205,89 +267,51 @@ export function MorningPlayer({
     }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
-      currentUtteranceRef.current = null;
     }
   }, []);
 
-  // Play Speech Synthesis in Russian for Track 2 (fallback) or Track 3 (Tasks)
-  const playRussianSpeechTrack = useCallback((trackIdx: number) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      console.warn('[Morning Oracle] SpeechSynthesis not available');
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-    let textToSpeak = '';
-
-    if (trackIdx === 1) {
-      // Track 2 Speech fallback
-      const topicsRu = newsTopics.length > 0
-        ? newsTopics.map((t) => TOPIC_NAMES_RU[t] || t).join(', ')
-        : 'технологии, искусственный интеллект и мировые события';
-      
-      textToSpeak = `Доброе утро! Это ваш персональный утренний дайджест Морнинг Оракул. Главные события по вашим темам: ${topicsRu}. Все системы работают в штатном режиме, впереди продуктивный день.`;
-    } else if (trackIdx === 2) {
-      // Track 3: Tasks breakdown
-      const currentTasks = tasksToSpeakRef.current;
-      console.log('[Morning Oracle] Track 3 tasks to speak:', currentTasks);
-
-      if (currentTasks.length > 0) {
-        const tasksList = currentTasks
-          .map((item, idx) => `${idx + 1}. ${item.text}`)
-          .join(', ');
-        textToSpeak = `Ваши задачи на сегодня: ${tasksList}. Желаю отличного дня!`;
-      } else {
-        textToSpeak = 'На сегодня запланированных задач нет. Отличного дня!';
+  // Helper to speak a single text chunk with Promise resolution on end
+  const speakTextChunk = useCallback((text: string, lang = 'ru-RU'): Promise<void> => {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+        resolve();
+        return;
       }
-    }
 
-    console.log(`[Morning Oracle] Playing Track ${trackIdx + 1} TTS:`, textToSpeak);
+      if (isTaskSpeechAbortedRef.current) {
+        resolve();
+        return;
+      }
 
-    const utterance = new SpeechSynthesisUtterance(textToSpeak);
-    utterance.lang = 'ru-RU';
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = lang;
+      utterance.rate = 0.95; // Natural pacing
+      utterance.pitch = 1.0;
 
-    currentUtteranceRef.current = utterance;
-
-    const assignVoice = () => {
       const voices = window.speechSynthesis.getVoices();
-      const ruVoice = voices.find((v) => v.lang.startsWith('ru') || v.lang.includes('RU'));
-      if (ruVoice) {
-        utterance.voice = ruVoice;
+      const langPrefix = lang.split('-')[0].toLowerCase();
+      const matchedVoice = voices.find((v) => v.lang.toLowerCase().startsWith(langPrefix));
+      if (matchedVoice) {
+        utterance.voice = matchedVoice;
       }
-    };
 
-    assignVoice();
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = assignVoice;
-    }
+      utterance.onend = () => {
+        resolve();
+      };
 
-    utterance.onstart = () => {
-      console.log(`[Morning Oracle] Track ${trackIdx + 1} speech started.`);
-    };
+      utterance.onerror = (e) => {
+        console.warn('[Morning Oracle Speech Error]:', e);
+        resolve();
+      };
 
-    utterance.onend = () => {
-      console.log(`[Morning Oracle] Track ${trackIdx + 1} speech completed.`);
-      if (activeTrackIndexRef.current === trackIdx) {
-        advanceToNextTrack();
-      }
-    };
-
-    utterance.onerror = (e) => {
-      console.warn(`[Morning Oracle] Track ${trackIdx + 1} speech error:`, e);
-      if (activeTrackIndexRef.current === trackIdx) {
-        advanceToNextTrack();
-      }
-    };
-
-    setTimeout(() => {
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
-      window.speechSynthesis.speak(utterance);
-    }, 60);
-  }, [newsTopics]);
+      setTimeout(() => {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+        window.speechSynthesis.speak(utterance);
+      }, 50);
+    });
+  }, []);
 
   // Advance to next track in queue
   const advanceToNextTrack = useCallback(() => {
@@ -302,97 +326,225 @@ export function MorningPlayer({
     }
   }, [stopCurrentAudio]);
 
-  // Main playback starter for any track index
-  const playTrack = useCallback((trackIdx: number) => {
-    stopCurrentAudio();
-    activeTrackIndexRef.current = trackIdx;
-    setCurrentTrackIndex(trackIdx);
-    setIsPlaying(true);
-    setProgress(0);
-    setIsCompleted(false);
+  // Stage 3: Sequential Task Readout Engine with Multi-language support & 500ms Pauses
+  const playSequentialTaskSpeech = useCallback(async () => {
+    isTaskSpeechAbortedRef.current = false;
+    setActiveTaskIndex(null);
 
-    if (trackIdx === 0) {
-      // Track 1: Play 5-Second HTML5 Chime
-      console.log('[Morning Oracle] Track 1: Starting 5-second ambient chimes...');
-      if (chimeAudioRef.current) {
-        chimeAudioRef.current.currentTime = 0;
-        chimeAudioRef.current.play().catch((err) => {
-          console.warn('[Morning Oracle] Chime audio play warning:', err);
-        });
+    const currentTasks = tasksToSpeakRef.current;
+    const isEn = digestLang === 'en';
+    const speechLang = isEn ? 'en-US' : 'ru-RU';
+
+    console.log(`[Morning Oracle Stage 3] Starting sequential task readout (${speechLang}):`, currentTasks);
+
+    if (currentTasks.length === 0) {
+      // Empty task list case
+      const emptyPhrase = isEn
+        ? 'Your task list is empty. Have a great day!'
+        : 'Список задач пуст. Отличного дня!';
+      await speakTextChunk(emptyPhrase, speechLang);
+      if (!isTaskSpeechAbortedRef.current && activeTrackIndexRef.current === 2) {
+        advanceToNextTrack();
+      }
+      return;
+    }
+
+    // 1. Introductory Cue (Language Specific)
+    const introPhrase = isEn ? 'Your task list.' : 'Твой список задач.';
+    await speakTextChunk(introPhrase, speechLang);
+
+    if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) return;
+
+    // ~500ms pause after intro cue
+    await new Promise((r) => setTimeout(r, 500));
+
+    // 2. Iterate through each task sequentially with ~500ms pauses
+    for (let i = 0; i < currentTasks.length; i++) {
+      if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) {
+        break;
       }
 
-      // Smooth 5-second countdown timer
-      progressTimerRef.current = setInterval(() => {
-        setProgress((prev) => {
-          const next = prev + 1;
-          if (next >= 5) {
-            if (activeTrackIndexRef.current === 0) {
-              console.log('[Morning Oracle] Track 1 completed (5s). Advancing to Track 2...');
-              advanceToNextTrack();
-            }
-            return 5;
-          }
-          return next;
-        });
-      }, 1000);
-    } else if (trackIdx === 1) {
-      // Track 2: Remote Supabase MP3 Broadcast
-      const freshNewsUrl = `${REMOTE_NEWS_AUDIO_BASE}?t=${Date.now()}`;
-      console.log('[Morning Oracle] Track 2: Loading remote MP3 from:', freshNewsUrl);
+      setActiveTaskIndex(i);
+      const task = currentTasks[i];
+      const taskSpeechText = isEn
+        ? `Task ${i + 1}. ${task.text}`
+        : `Задача ${i + 1}. ${task.text}`;
 
-      const audio = new Audio(freshNewsUrl);
-      newsAudioRef.current = audio;
+      await speakTextChunk(taskSpeechText, speechLang);
 
-      audio.onloadedmetadata = () => {
-        const dur = Math.ceil(audio.duration);
-        if (dur && !isNaN(dur)) {
-          setTrack2Duration(dur);
-          console.log('[Morning Oracle] Track 2 MP3 duration loaded:', dur);
-        }
-      };
+      if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) {
+        break;
+      }
 
-      audio.ontimeupdate = () => {
-        if (activeTrackIndexRef.current === 1) {
-          setProgress(Math.floor(audio.currentTime));
-        }
-      };
-
-      audio.onended = () => {
-        console.log('[Morning Oracle] Track 2 remote MP3 finished playing naturally. Advancing to Track 3...');
-        if (activeTrackIndexRef.current === 1) {
-          advanceToNextTrack();
-        }
-      };
-
-      audio.onerror = (e) => {
-        console.warn('[Morning Oracle] Track 2 remote MP3 failed to load/play. Switching to Russian TTS fallback:', e);
-        if (activeTrackIndexRef.current === 1) {
-          playRussianSpeechTrack(1);
-        }
-      };
-
-      audio.play().then(() => {
-        console.log('[Morning Oracle] Track 2: Remote MP3 play() succeeded.');
-      }).catch((err) => {
-        console.warn('[Morning Oracle] Track 2 play() was blocked or failed:', err);
-        playRussianSpeechTrack(1);
-      });
-    } else if (trackIdx === 2) {
-      // Track 3: Tasks Breakdown Speech
-      console.log('[Morning Oracle] Track 3: Starting tasks breakdown speech...');
-      playRussianSpeechTrack(2);
-      const estDuration = tasksToSpeakRef.current.length > 0 ? Math.max(10, tasksToSpeakRef.current.length * 5) : 8;
-      progressTimerRef.current = setInterval(() => {
-        setProgress((prev) => Math.min(prev + 1, estDuration));
-      }, 1000);
+      // ~500ms clean delay between tasks
+      if (i < currentTasks.length - 1) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
     }
-  }, [stopCurrentAudio, playRussianSpeechTrack, advanceToNextTrack]);
+
+    setActiveTaskIndex(null);
+
+    if (!isTaskSpeechAbortedRef.current && activeTrackIndexRef.current === 2) {
+      console.log('[Morning Oracle Stage 3] All tasks read. Concluding broadcast.');
+      advanceToNextTrack();
+    }
+  }, [digestLang, speakTextChunk, advanceToNextTrack]);
+
+  // Track 2 Speech fallback
+  const playNewsSpeechFallback = useCallback(async () => {
+    const isEn = digestLang === 'en';
+    const speechLang = isEn ? 'en-US' : 'ru-RU';
+
+    let textToSpeak = '';
+    if (isEn) {
+      const topicsEn = newsTopics.length > 0
+        ? newsTopics.map((t) => TOPIC_NAMES_EN[t] || t).join(', ')
+        : 'technology, artificial intelligence and world news';
+      textToSpeak = `Good morning! Here is your personalized Morning Oracle digest. Key updates across your topics: ${topicsEn}. All systems are nominal, have a productive day ahead.`;
+    } else {
+      const topicsRu = newsTopics.length > 0
+        ? newsTopics.map((t) => TOPIC_NAMES_RU[t] || t).join(', ')
+        : 'технологии, искусственный интеллект и мировые события';
+      textToSpeak = `Доброе утро! Это ваш персональный утренний дайджест Морнинг Оракул. Главные события по вашим темам: ${topicsRu}. Все системы работают в штатном режиме, впереди продуктивный день.`;
+    }
+
+    await speakTextChunk(textToSpeak, speechLang);
+    if (!isTaskSpeechAbortedRef.current && activeTrackIndexRef.current === 1) {
+      advanceToNextTrack();
+    }
+  }, [digestLang, newsTopics, speakTextChunk, advanceToNextTrack]);
+
+  // Main playback starter for any track index
+  const playTrack = useCallback(
+    (trackIdx: number) => {
+      stopCurrentAudio();
+      activeTrackIndexRef.current = trackIdx;
+      setCurrentTrackIndex(trackIdx);
+      setIsPlaying(true);
+      setProgress(0);
+      setIsCompleted(false);
+      isTaskSpeechAbortedRef.current = false;
+
+      if (trackIdx === 0) {
+        // Track 1: Play 5-Second HTML5 Chime
+        console.log('[Morning Oracle] Track 1: Starting 5-second ambient chimes...');
+        if (chimeAudioRef.current) {
+          chimeAudioRef.current.currentTime = 0;
+          chimeAudioRef.current.play().catch((err) => {
+            console.warn('[Morning Oracle] Chime audio play warning:', err);
+          });
+        }
+
+        // Smooth 5-second countdown timer
+        progressTimerRef.current = setInterval(() => {
+          setProgress((prev) => {
+            const next = prev + 1;
+            if (next >= 5) {
+              if (activeTrackIndexRef.current === 0) {
+                console.log('[Morning Oracle] Track 1 completed (5s). Advancing to Track 2...');
+                advanceToNextTrack();
+              }
+              return 5;
+            }
+            return next;
+          });
+        }, 1000);
+      } else if (trackIdx === 1) {
+        // Track 2: Remote Supabase MP3 Broadcast (Language specific with fallback)
+        const primaryNewsUrl =
+          digestLang === 'en'
+            ? `${REMOTE_NEWS_AUDIO_EN}?t=${Date.now()}`
+            : `${REMOTE_NEWS_AUDIO_RU}?t=${Date.now()}`;
+
+        console.log(`[Morning Oracle] Track 2: Loading remote MP3 (${digestLang.toUpperCase()}) from:`, primaryNewsUrl);
+
+        const audio = new Audio(primaryNewsUrl);
+        newsAudioRef.current = audio;
+
+        audio.onloadedmetadata = () => {
+          const dur = Math.ceil(audio.duration);
+          if (dur && !isNaN(dur)) {
+            setTrack2Duration(dur);
+            console.log('[Morning Oracle] Track 2 MP3 duration loaded:', dur);
+          }
+        };
+
+        audio.ontimeupdate = () => {
+          if (activeTrackIndexRef.current === 1) {
+            setProgress(Math.floor(audio.currentTime));
+          }
+        };
+
+        audio.onended = () => {
+          console.log('[Morning Oracle] Track 2 remote MP3 finished. Advancing to Track 3...');
+          if (activeTrackIndexRef.current === 1) {
+            advanceToNextTrack();
+          }
+        };
+
+        audio.onerror = (e) => {
+          console.warn('[Morning Oracle] Track 2 remote MP3 failed. Trying fallback/TTS:', e);
+          if (digestLang === 'en') {
+            // Try Russian broadcast file as intermediate fallback if English MP3 is not yet ready
+            console.log('[Morning Oracle] Attempting fallback to default today_news.mp3...');
+            const fallbackAudio = new Audio(`${REMOTE_NEWS_AUDIO_RU}?t=${Date.now()}`);
+            newsAudioRef.current = fallbackAudio;
+
+            fallbackAudio.onloadedmetadata = () => {
+              const dur = Math.ceil(fallbackAudio.duration);
+              if (dur && !isNaN(dur)) setTrack2Duration(dur);
+            };
+
+            fallbackAudio.ontimeupdate = () => {
+              if (activeTrackIndexRef.current === 1) {
+                setProgress(Math.floor(fallbackAudio.currentTime));
+              }
+            };
+
+            fallbackAudio.onended = () => {
+              if (activeTrackIndexRef.current === 1) advanceToNextTrack();
+            };
+
+            fallbackAudio.onerror = () => {
+              if (activeTrackIndexRef.current === 1) playNewsSpeechFallback();
+            };
+
+            fallbackAudio.play().catch(() => {
+              if (activeTrackIndexRef.current === 1) playNewsSpeechFallback();
+            });
+          } else {
+            if (activeTrackIndexRef.current === 1) playNewsSpeechFallback();
+          }
+        };
+
+        audio
+          .play()
+          .then(() => {
+            console.log('[Morning Oracle] Track 2: Remote MP3 play() succeeded.');
+          })
+          .catch((err) => {
+            console.warn('[Morning Oracle] Track 2 play() was blocked or failed:', err);
+            playNewsSpeechFallback();
+          });
+      } else if (trackIdx === 2) {
+        // Track 3: Enhanced Sequential Task Readout
+        console.log('[Morning Oracle] Track 3: Launching sequential task readout...');
+        playSequentialTaskSpeech();
+        const estDuration =
+          tasksToSpeakRef.current.length > 0 ? Math.max(12, tasksToSpeakRef.current.length * 6) : 6;
+        progressTimerRef.current = setInterval(() => {
+          setProgress((prev) => Math.min(prev + 1, estDuration));
+        }, 1000);
+      }
+    },
+    [digestLang, stopCurrentAudio, playNewsSpeechFallback, playSequentialTaskSpeech, advanceToNextTrack]
+  );
 
   // Handle modal open/close lifecycle
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
       wasOpenRef.current = true;
-      // Fetch fresh tasks from Supabase immediately on modal open
+      refreshDigestLang();
       fetchLiveTasks();
       playTrack(0);
     } else if (!isOpen && wasOpenRef.current) {
@@ -404,7 +556,7 @@ export function MorningPlayer({
     return () => {
       stopCurrentAudio();
     };
-  }, [isOpen, fetchLiveTasks, playTrack, stopCurrentAudio]);
+  }, [isOpen, refreshDigestLang, fetchLiveTasks, playTrack, stopCurrentAudio]);
 
   // Direct Track Selection
   const handleSelectTrack = (idx: number) => {
@@ -470,7 +622,6 @@ export function MorningPlayer({
       )}
 
       <div className="glass-card rounded-3xl w-full max-w-md border border-oracle-cyan/40 overflow-hidden shadow-[0_0_50px_rgba(0,229,255,0.25)] animate-fadeIn relative">
-        
         {/* Ambient Glow Circles */}
         <div className="absolute -top-32 -right-32 w-64 h-64 bg-oracle-cyan/20 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-32 -left-32 w-64 h-64 bg-oracle-magenta/20 rounded-full blur-3xl pointer-events-none" />
@@ -486,7 +637,7 @@ export function MorningPlayer({
                 Morning Oracle Broadcast
               </h2>
               <span className="text-[10px] text-oracle-muted font-mono">
-                Track {currentTrackIndex + 1} of {tracks.length}
+                Track {currentTrackIndex + 1} of {tracks.length} • Lang: {digestLang.toUpperCase()}
               </span>
             </div>
           </div>
@@ -501,10 +652,9 @@ export function MorningPlayer({
         </div>
 
         {/* Player Body */}
-        <div className="p-6 space-y-6 flex flex-col items-center text-center">
-          
+        <div className="p-6 space-y-5 flex flex-col items-center text-center">
           {/* Animated Equalizer Visualizer */}
-          <div className="h-16 flex items-end justify-center space-x-1.5 py-2">
+          <div className="h-14 flex items-end justify-center space-x-1.5 py-1">
             {[40, 75, 100, 60, 85, 45, 90, 65, 35, 80].map((height, i) => (
               <span
                 key={i}
@@ -524,7 +674,7 @@ export function MorningPlayer({
           </div>
 
           {/* Current Track Metadata */}
-          <div className="space-y-1">
+          <div className="space-y-1 w-full">
             <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-oracle-dark/90 border border-oracle-cyan/30 text-oracle-cyan text-[11px] font-mono uppercase tracking-wider mb-1">
               {currentTrack.iconType === 'music' && <Music className="w-3 h-3" />}
               {currentTrack.iconType === 'radio' && <Radio className="w-3 h-3" />}
@@ -543,6 +693,30 @@ export function MorningPlayer({
               </p>
             )}
           </div>
+
+          {/* Track 3 Live Spoken Task Highlighting List */}
+          {currentTrackIndex === 2 && tasksToSpeakRef.current.length > 0 && (
+            <div className="w-full max-h-28 overflow-y-auto space-y-1 text-left px-1 py-1 bg-oracle-dark/50 rounded-xl border border-oracle-border/60 text-xs">
+              {tasksToSpeakRef.current.map((task, idx) => (
+                <div
+                  key={task.id}
+                  className={`p-2 rounded-lg transition-all flex items-center justify-between ${
+                    activeTaskIndex === idx
+                      ? 'bg-oracle-cyan/20 border border-oracle-cyan/60 text-oracle-cyan font-medium shadow-cyan-glow'
+                      : 'text-oracle-muted bg-transparent'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2 truncate">
+                    <span className="font-mono text-[10px] opacity-75">#{idx + 1}</span>
+                    <span className="truncate">{task.text}</span>
+                  </div>
+                  {activeTaskIndex === idx && (
+                    <Volume2 className="w-3.5 h-3.5 text-oracle-cyan animate-pulse shrink-0 ml-2" />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Progress Bar */}
           <div className="w-full space-y-1.5">
@@ -596,16 +770,16 @@ export function MorningPlayer({
           </div>
 
           {/* Sequential Queue Overview */}
-          <div className="w-full pt-4 border-t border-oracle-border/60 text-left space-y-2">
-            <span className="text-[10px] uppercase font-mono tracking-widest text-oracle-muted block mb-1">
+          <div className="w-full pt-3 border-t border-oracle-border/60 text-left space-y-1.5">
+            <span className="text-[10px] uppercase font-mono tracking-widest text-oracle-muted block mb-0.5">
               Broadcast Playlist:
             </span>
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               {tracks.map((t, idx) => (
                 <div
                   key={t.id}
                   onClick={() => handleSelectTrack(idx)}
-                  className={`flex items-center justify-between p-2.5 rounded-xl text-xs cursor-pointer transition ${
+                  className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer transition ${
                     idx === currentTrackIndex
                       ? 'bg-oracle-cyan/15 border border-oracle-cyan/40 text-oracle-cyan font-semibold shadow-sm'
                       : idx < currentTrackIndex

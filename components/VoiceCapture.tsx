@@ -10,16 +10,15 @@ interface VoiceCaptureProps {
 }
 
 const SUPPORTED_LANGUAGES = [
-  { code: 'ru-RU', label: 'RU' },
   { code: 'en-US', label: 'EN' },
-  { code: 'uk-UA', label: 'UA' },
+  { code: 'ru-RU', label: 'RU' },
 ];
 
 export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimText, setInterimText] = useState('');
-  const [selectedLang, setSelectedLang] = useState('ru-RU');
+  const [selectedLang, setSelectedLang] = useState('en-US');
   const [isSaving, setIsSaving] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -29,22 +28,33 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
   const isExplicitStopRef = useRef(false);
   const accumulatedTextRef = useRef('');
 
-  // Check Web Speech API availability on mount
+  // Initialize Web Speech API & load saved language
   useEffect(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setIsSpeechSupported(false);
     }
+
+    if (typeof window !== 'undefined') {
+      try {
+        const savedLang = localStorage.getItem('morning_oracle_voice_lang');
+        if (savedLang && (savedLang === 'en-US' || savedLang === 'ru-RU')) {
+          setSelectedLang(savedLang);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
   }, []);
 
   // Format transcribed text with Gemini AI via /api/format-idea
   const formatTextWithAI = useCallback(async (rawText: string) => {
-    if (!rawText || !rawText.trim() || rawText.trim().length < 3) return;
+    if (!rawText || !rawText.trim() || rawText.trim().length < 2) return;
 
     setIsFormatting(true);
     try {
-      console.log('[Morning Oracle] Requesting AI formatting for:', rawText);
+      console.log('[Morning Oracle Client] Requesting AI formatting for:', rawText);
       const res = await fetch('/api/format-idea', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -54,13 +64,13 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       if (res.ok) {
         const data = await res.json();
         if (data?.formattedText && data.formattedText.trim()) {
-          console.log('[Morning Oracle] AI formatted result:', data.formattedText);
+          console.log('[Morning Oracle Client] AI formatted result:', data.formattedText);
           setTranscript(data.formattedText);
           accumulatedTextRef.current = data.formattedText;
         }
       }
     } catch (err) {
-      console.warn('[Morning Oracle] AI formatting request error:', err);
+      console.warn('[Morning Oracle Client] AI formatting request error:', err);
     } finally {
       setIsFormatting(false);
     }
@@ -102,7 +112,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     }
   }, [transcript, interimText, formatTextWithAI]);
 
-  // Start fresh listening session (native SpeechRecognition request without getUserMedia conflicts)
+  // Start fresh listening session
   const startListening = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -125,14 +135,13 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     try {
       const recognition = new SpeechRecognition();
 
-      // Touch-to-talk configuration for Android Chrome & Desktop:
       recognition.continuous = false;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
       recognition.lang = selectedLang;
 
       recognition.onstart = () => {
-        console.log('[Morning Oracle] Speech recognition session started with lang:', selectedLang);
+        console.log('[Morning Oracle Client] Speech recognition session started with lang:', selectedLang);
         setIsListening(true);
       };
 
@@ -166,9 +175,9 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       };
 
       recognition.onerror = (event: any) => {
-        console.log('[Morning Oracle] Speech recognition error/notice:', event.error);
+        console.log('[Morning Oracle Client] Speech recognition notice:', event.error);
 
-        // Completely ignore benign non-critical errors (aborted, no-speech)
+        // Completely suppress non-critical transient states (aborted, no-speech)
         if (event.error === 'aborted' || event.error === 'no-speech') {
           return;
         }
@@ -196,11 +205,11 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       };
 
       recognition.onend = () => {
-        console.log('[Morning Oracle] Speech recognition session ended.');
+        console.log('[Morning Oracle Client] Speech recognition session concluded.');
         setIsListening(false);
         setInterimText('');
 
-        // Trigger AI formatting automatically after utterance ends naturally
+        // Trigger AI formatting automatically after natural speech pause
         if (!isExplicitStopRef.current && accumulatedTextRef.current) {
           formatTextWithAI(accumulatedTextRef.current);
         }
@@ -209,9 +218,8 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       recognitionRef.current = recognition;
       recognition.start();
     } catch (err: any) {
-      console.error('[Morning Oracle] Exception starting SpeechRecognition:', err);
+      console.error('[Morning Oracle Client] Exception starting SpeechRecognition:', err);
       setIsListening(false);
-      // Suppress noisy startup aborts
       if (err.name !== 'AbortError') {
         setStatusMessage({
           type: 'error',
@@ -233,6 +241,13 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
   // Language Change handler
   const handleLangChange = (langCode: string) => {
     setSelectedLang(langCode);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('morning_oracle_voice_lang', langCode);
+      } catch (e) {
+        // ignore
+      }
+    }
     if (isListening) {
       stopListening();
     }
@@ -264,7 +279,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     };
 
     try {
-      console.log('[Morning Oracle] Inserting idea to Supabase ideas table:', payload);
+      console.log('[Morning Oracle Client] Inserting idea to Supabase ideas table:', payload);
       const { data, error } = await supabase
         .from('ideas')
         .insert([payload])
@@ -272,7 +287,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         .single();
 
       if (error) {
-        console.error('[Morning Oracle] Supabase insert error details:', {
+        console.error('[Morning Oracle Client] Supabase insert error details:', {
           message: error.message,
           details: error.details,
           hint: error.hint,
@@ -292,7 +307,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         onIdeaSaved(data as Idea);
       }
     } catch (err: any) {
-      console.error('[Morning Oracle] Unexpected error saving idea:', err);
+      console.error('[Morning Oracle Client] Unexpected error saving idea:', err);
       const msg = err?.message || 'Network / server communication error';
       setStatusMessage({ type: 'error', text: msg });
     } finally {
@@ -328,7 +343,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
           </div>
 
           <div className="flex items-center space-x-2">
-            {/* Language Selector */}
+            {/* Language Selector: EN & RU */}
             <div className="flex items-center bg-oracle-dark rounded-lg p-0.5 border border-oracle-border/60 text-[10px] font-mono">
               <Globe className="w-3 h-3 text-oracle-muted mx-1" />
               {SUPPORTED_LANGUAGES.map((lang) => (
@@ -336,7 +351,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
                   key={lang.code}
                   type="button"
                   onClick={() => handleLangChange(lang.code)}
-                  className={`px-1.5 py-0.5 rounded transition ${
+                  className={`px-2 py-0.5 rounded transition ${
                     selectedLang === lang.code
                       ? 'bg-oracle-cyan/20 text-oracle-cyan font-bold border border-oracle-cyan/40'
                       : 'text-oracle-muted hover:text-white'
@@ -394,7 +409,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
           </div>
           <p className="text-xs text-oracle-muted mt-3 text-center flex items-center justify-center gap-1.5">
             {isListening ? (
-              <span>Listening in {selectedLang}... (tap to finish)</span>
+              <span>Listening in {selectedLang === 'en-US' ? 'English' : 'Russian'}... (tap to finish)</span>
             ) : isFormatting ? (
               <span className="text-oracle-magenta font-mono animate-pulse">
                 Polishing punctuation with AI... ✨
@@ -417,7 +432,11 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
                 setInterimText('');
                 accumulatedTextRef.current = e.target.value;
               }}
-              placeholder="e.g. Купить молоко, проверить отчет, позвонить коллеге..."
+              placeholder={
+                selectedLang === 'en-US'
+                  ? 'e.g. Buy milk, review quarterly presentation, call team...'
+                  : 'e.g. Купить молоко, проверить презентацию, созвониться с командой...'
+              }
               rows={3}
               className="w-full bg-oracle-dark/90 border border-oracle-border focus:border-oracle-cyan focus:ring-1 focus:ring-oracle-cyan/50 rounded-xl p-3 text-sm text-white placeholder-gray-500 outline-none resize-none transition-all"
             />

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { X, Clock, Newspaper, Save, CheckCircle2, AlertCircle } from 'lucide-react';
+import { X, Clock, Newspaper, Save, CheckCircle2, AlertCircle, Globe } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Settings } from '@/lib/types';
 
@@ -26,6 +26,7 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
   const [alarmTime, setAlarmTime] = useState('07:30');
   const [isAlarmEnabled, setIsAlarmEnabled] = useState(true);
   const [selectedTopics, setSelectedTopics] = useState<string[]>(['technology', 'world', 'ai']);
+  const [digestLang, setDigestLang] = useState<'ru' | 'en'>('ru');
   
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -43,6 +44,11 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
     // Fast load from localStorage cache first
     if (typeof window !== 'undefined') {
       try {
+        const savedDigestLang = localStorage.getItem('oracle_digest_lang');
+        if (savedDigestLang === 'en' || savedDigestLang === 'ru') {
+          setDigestLang(savedDigestLang);
+        }
+
         const cached = localStorage.getItem('morning_oracle_settings_cache');
         if (cached) {
           const parsed = JSON.parse(cached);
@@ -95,6 +101,16 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
   const handleSave = async () => {
     setIsSaving(true);
     setStatus(null);
+
+    // Save digest language to localStorage
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('oracle_digest_lang', digestLang);
+        window.dispatchEvent(new Event('oracle_digest_lang_changed'));
+      } catch (e) {
+        // ignore
+      }
+    }
 
     try {
       const payload: Partial<Settings> = {
@@ -167,8 +183,48 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
             <p className="text-xs text-oracle-muted text-center py-6">Loading settings...</p>
           ) : (
             <>
-              {/* Alarm Time Section */}
+              {/* Radio Digest Language Section */}
               <div className="space-y-3">
+                <div className="flex items-center space-x-2 text-oracle-cyan">
+                  <Globe className="w-4 h-4" />
+                  <h4 className="text-xs font-semibold uppercase tracking-wider">
+                    Morning Digest Language
+                  </h4>
+                </div>
+                <p className="text-xs text-oracle-muted">
+                  Choose the primary language for your AI morning radio broadcast and tasks:
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDigestLang('ru')}
+                    className={`py-2.5 px-3 rounded-xl text-xs font-semibold transition-all border flex items-center justify-center space-x-2 ${
+                      digestLang === 'ru'
+                        ? 'bg-oracle-cyan/20 border-oracle-cyan text-oracle-cyan shadow-cyan-glow'
+                        : 'bg-oracle-dark border-oracle-border text-oracle-muted hover:text-white'
+                    }`}
+                  >
+                    <span>🇷🇺</span>
+                    <span>RU (Русский)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDigestLang('en')}
+                    className={`py-2.5 px-3 rounded-xl text-xs font-semibold transition-all border flex items-center justify-center space-x-2 ${
+                      digestLang === 'en'
+                        ? 'bg-oracle-cyan/20 border-oracle-cyan text-oracle-cyan shadow-cyan-glow'
+                        : 'bg-oracle-dark border-oracle-border text-oracle-muted hover:text-white'
+                    }`}
+                  >
+                    <span>🇬🇧</span>
+                    <span>EN (English)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Alarm Time Section */}
+              <div className="space-y-3 pt-3 border-t border-oracle-border/40">
                 <div className="flex items-center space-x-2 text-oracle-cyan">
                   <Clock className="w-4 h-4" />
                   <h4 className="text-xs font-semibold uppercase tracking-wider">
@@ -195,7 +251,7 @@ export function SettingsModal({ isOpen, onClose, onSettingsSaved }: SettingsModa
               </div>
 
               {/* News Topics Section */}
-              <div className="space-y-3">
+              <div className="space-y-3 pt-3 border-t border-oracle-border/40">
                 <div className="flex items-center space-x-2 text-oracle-cyan">
                   <Newspaper className="w-4 h-4" />
                   <h4 className="text-xs font-semibold uppercase tracking-wider">
