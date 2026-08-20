@@ -15,6 +15,7 @@ import {
   Volume2,
   Loader2,
   Headphones,
+  AlertCircle,
   Check
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
@@ -40,7 +41,7 @@ export function IdeaList({
   const [briefingAudioUrl, setBriefingAudioUrl] = useState<string | null>(null);
   const [briefingScript, setBriefingScript] = useState<string | null>(null);
   const [isPlayingBriefing, setIsPlayingBriefing] = useState(false);
-  const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [statusNotice, setStatusNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -93,16 +94,25 @@ export function IdeaList({
 
       const data = await response.json();
       if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Failed to generate task briefing');
+        if (data?.script) {
+          setBriefingScript(data.script);
+        }
+        throw new Error(data.error || 'TTS synthesis service is temporarily unreachable');
       }
 
       console.log('[Morning Oracle] Briefing generation succeeded:', data);
       setBriefingAudioUrl(data.audioUrl);
       setBriefingScript(data.script);
-      setStatusNotice('AI Assistant briefing generated successfully!');
+      setStatusNotice({
+        type: 'success',
+        text: 'AI Assistant briefing generated successfully!',
+      });
     } catch (err: any) {
       console.error('[Morning Oracle] Briefing generation error:', err);
-      setStatusNotice('Error generating briefing: ' + (err.message || 'Server error'));
+      setStatusNotice({
+        type: 'error',
+        text: 'TTS service notice: ' + (err.message || 'Server error'),
+      });
     } finally {
       setIsGeneratingBriefing(false);
       setTimeout(() => setStatusNotice(null), 6000);
@@ -284,9 +294,19 @@ export function IdeaList({
 
       {/* Notice Message */}
       {statusNotice && (
-        <div className="mb-3 p-2.5 rounded-xl bg-oracle-dark/90 border border-oracle-cyan/40 text-oracle-cyan text-xs font-mono flex items-center space-x-2 animate-fadeIn">
-          <Sparkles className="w-3.5 h-3.5 shrink-0" />
-          <span>{statusNotice}</span>
+        <div
+          className={`mb-3 p-2.5 rounded-xl text-xs font-mono flex items-center space-x-2 animate-fadeIn ${
+            statusNotice.type === 'success'
+              ? 'bg-oracle-cyan/15 border border-oracle-cyan/40 text-oracle-cyan'
+              : 'bg-oracle-magenta/15 border border-oracle-magenta/40 text-oracle-magenta'
+          }`}
+        >
+          {statusNotice.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          )}
+          <span>{statusNotice.text}</span>
         </div>
       )}
 

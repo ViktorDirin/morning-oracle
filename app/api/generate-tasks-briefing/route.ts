@@ -1,140 +1,108 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-import { synthesizeEdgeTts } from '@/lib/edge-tts';
-
-export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
   try {
-    const { tasks = [], lang = 'ru' } = await req.json();
+    const { tasks, lang = 'ru' } = await req.json();
 
-    const isEn = lang === 'en';
-    const activeTasks: string[] = tasks
-      .map((t: any) => (t.text || t.title || '').trim())
-      .filter(Boolean);
+    if (!tasks || !Array.isArray(tasks) || tasks.length === 0) {
+      return NextResponse.json({
+        success: true,
+        script:
+          lang === 'en'
+            ? 'No tasks scheduled for tomorrow.'
+            : 'На завтра задач пока нет. Можно отдыхать!',
+        audioUrl: null,
+      });
+    }
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      console.warn('[Morning Oracle Server] GEMINI_API_KEY is not defined.');
+      return NextResponse.json({ error: 'GEMINI_API_KEY is not set' }, { status: 500 });
+    }
+
+    const taskTitles = tasks
+      .map(
+        (t: { title?: string; text?: string }, idx: number) =>
+          `${idx + 1}. ${t.title || t.text || ''}`
+      )
+      .join('\n');
+
+    const systemPrompt =
+      lang === 'en'
+        ? `You are a warm, witty female personal assistant. Create a lively, smooth 30-45 second spoken monologue reminding the user about their upcoming tasks for tomorrow.
+STRICT RULES:
+- Do NOT use bullet points, numbering, or lists.
+- Do NOT say "Task 1", "Task 2". Connect everything naturally into human speech.
+- Output ONLY the final plain text for speech synthesis.`
+        : `Ты — заботливая и слегка ироничная девушка-ассистент. Составь живой связный монолог на 30–45 секунд, напоминая пользователю о его планах на завтра.
+СТРОГИЕ ПРАВИЛА:
+- Никаких списков, маркеров и нумерации.
+- Не говори "Задача один", "Задача два". Свяжи всё в плавную разговорную речь.
+- Верни ТОЛЬКО готовый текст для озвучки без комментариев и пометок.`;
+
+    const userPrompt = `Here are the tasks for tomorrow:\n${taskTitles}\n\nDeliver the assistant spoken script now:`;
+
+    // 1. Generate text via Gemini Flash
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }],
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!geminiRes.ok) {
+      const err = await geminiRes.text();
+      return NextResponse.json({ error: `Gemini API error: ${err}` }, { status: 500 });
+    }
+
+    const geminiData = await geminiRes.json();
+    const script =
+      geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+
+    // 2. Synthesize audio on Oracle Backend
+    const ORACLE_TTS_URL =
+      process.env.ORACLE_TTS_API_URL || 'http://130.61.208.40:8000/synthesize-task-audio';
+    const voice = lang === 'en' ? 'en-US-JennyNeural' : 'ru-RU-SvetlanaNeural';
+    const filename = lang === 'en' ? 'today_tasks_en.mp3' : 'today_tasks.mp3';
+
+    const ttsRes = await fetch(ORACLE_TTS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: script,
+        voice: voice,
+        filename: filename,
+      }),
+    });
+
+    if (!ttsRes.ok) {
+      const ttsErr = await ttsRes.text();
       return NextResponse.json(
-        { error: 'GEMINI_API_KEY is missing on server' },
+        {
+          error: `Oracle TTS failed (${ttsRes.status}): ${ttsErr}`,
+          script: script,
+        },
         { status: 500 }
       );
     }
 
-    let assistantScript = '';
-
-    if (activeTasks.length === 0) {
-      assistantScript = isEn
-        ? "Hey, you have zero scheduled tasks for today! Take your time, enjoy your morning coffee, and have an amazing day ahead!"
-        : "Слушай, на сегодня у тебя никаких срочных задач не запланировано! Можешь спокойно выпить кофе и провести этот день в свое удовольствие. Отличного дня!";
-    } else {
-      const taskListFormatted = activeTasks.map((t, idx) => `${idx + 1}. ${t}`).join('\n');
-
-      const systemPrompt = isEn
-        ? `You are a witty, warm, caring female personal assistant giving a brief spoken morning briefing to your boss about their planned tasks for today.
-CRITICAL RULES:
-- Return ONLY the spoken plain text monologue.
-- Strictly NO robotic list numbering (NEVER say "Task 1", "Task 2", "First item", etc.).
-- Seamlessly weave all the user's tasks into a conversational, energetic 25-45 second spoken reminder.
-- NO emojis, NO markdown headers, NO bullet points, NO quotes.
-- Example tone: "Hey, quick heads-up on your plans today. You wanted to finish the design review, and make sure you also check the deployment report before lunch. Take it step by step, let's crush it today!"`
-        : `Ты — остроумная, заботливая и энергичная персональная ассистентка, которая утром голосом напоминает своему боссу о планах на сегодня.
-СТРОГИЕ ПРАВИЛА:
-- Верни ТОЛЬКО чистый связный разговорный текст для озвучивания.
-- Строго ЗАПРЕЩЕНЫ списки и роботизированная нумерация (НИКОГДА не говори "Задача один", "Задача два", "Пункт первый" и т.д.).
-- Органично свяжи все задачи в живой разговорный монолог на 25-45 секунд.
-- БЕЗ смайликов/эмодзи, БЕЗ markdown-разметки, БЕЗ кавычек.
-- Пример стиля: "Слушай, насчет сегодняшних планов. Ты хотел закончить отчет по проекту, а еще нужно обязательно позвонить в банк до обеда. Постарайся все успеть, я в тебя верю!"`;
-
-      const promptText = `${systemPrompt}\n\nToday's task items to mention:\n${taskListFormatted}`;
-
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
-
-      const geminiResponse = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: promptText }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 350 },
-        }),
-      });
-
-      if (!geminiResponse.ok) {
-        const errText = await geminiResponse.text();
-        console.error('[Morning Oracle Server] Gemini task briefing script generation failed:', errText);
-        // Fallback script if Gemini is unavailable
-        assistantScript = isEn
-          ? `Hey, here is a quick reminder of your tasks: ${activeTasks.join(', ')}. Have a wonderful and productive day!`
-          : `Привет! Напоминаю твои задачи на сегодня: ${activeTasks.join(', ')}. Желаю отличного и продуктивного дня!`;
-      } else {
-        const geminiData = await geminiResponse.json();
-        const rawScript =
-          geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
-        assistantScript = rawScript.replace(/^["'`]|["'`]$/g, '').trim();
-      }
-    }
-
-    console.log('[Morning Oracle Server] Generated Task Script:', assistantScript);
-
-    // 2. Synthesize audio with Edge-TTS
-    const voice = isEn ? 'en-US-JennyNeural' : 'ru-RU-SvetlanaNeural';
-    let audioBuffer: Buffer;
-
-    try {
-      console.log(`[Morning Oracle Server] Synthesizing task briefing with Edge-TTS (${voice})...`);
-      audioBuffer = await synthesizeEdgeTts(assistantScript, {
-        voice,
-        rate: '+2%',
-        pitch: '+0Hz',
-      });
-      console.log(`[Morning Oracle Server] Synthesized MP3 audio buffer (${audioBuffer.length} bytes)`);
-    } catch (ttsErr: any) {
-      console.error('[Morning Oracle Server] Edge-TTS synthesis error:', ttsErr);
-      // Return the script even if TTS synthesis fails
-      return NextResponse.json({
-        success: false,
-        script: assistantScript,
-        error: 'Edge-TTS synthesis failed: ' + ttsErr.message,
-      });
-    }
-
-    // 3. Upload to Supabase Storage bucket 'morning_audio'
-    const fileName = isEn ? 'today_tasks_en.mp3' : 'today_tasks.mp3';
-    console.log(`[Morning Oracle Server] Uploading ${fileName} to Supabase bucket 'morning_audio'...`);
-
-    const { data: uploadData, error: uploadError } = await supabase.storage
-      .from('morning_audio')
-      .upload(fileName, audioBuffer, {
-        contentType: 'audio/mpeg',
-        upsert: true,
-      });
-
-    if (uploadError) {
-      console.error('[Morning Oracle Server] Supabase storage upload error:', uploadError);
-      return NextResponse.json({
-        success: false,
-        script: assistantScript,
-        error: 'Failed to upload audio to Supabase Storage: ' + uploadError.message,
-      });
-    }
-
-    const { data: publicUrlData } = supabase.storage
-      .from('morning_audio')
-      .getPublicUrl(fileName);
-
-    const publicUrl = `${publicUrlData.publicUrl}?t=${Date.now()}`;
-    console.log('[Morning Oracle Server] Task briefing audio published successfully:', publicUrl);
+    const ttsData = await ttsRes.json();
 
     return NextResponse.json({
       success: true,
-      script: assistantScript,
-      audioUrl: publicUrl,
-      taskCount: activeTasks.length,
-      voice,
+      script: script,
+      audioUrl: ttsData.audioUrl,
     });
   } catch (error: any) {
-    console.error('[Morning Oracle Server] Unhandled error in /api/generate-tasks-briefing:', error);
     return NextResponse.json(
       { error: error.message || 'Internal server error' },
       { status: 500 }
