@@ -17,7 +17,6 @@ const SUPPORTED_LANGUAGES = [
 export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
-  const [interimText, setInterimText] = useState('');
   const [selectedLang, setSelectedLang] = useState('en-US');
   const [isSaving, setIsSaving] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
@@ -25,10 +24,9 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
   const [isSpeechSupported, setIsSpeechSupported] = useState(true);
 
   const recognitionRef = useRef<any>(null);
-  const isExplicitStopRef = useRef(false);
-  const accumulatedTextRef = useRef('');
+  const latestCapturedTextRef = useRef<string>('');
 
-  // Initialize Web Speech API & load saved language
+  // Check Web Speech API availability & load persisted language
   useEffect(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -54,7 +52,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
 
     setIsFormatting(true);
     try {
-      console.log('[Morning Oracle Client] Requesting AI formatting for:', rawText);
+      console.log('[Morning Oracle] Requesting AI formatting for:', rawText);
       const res = await fetch('/api/format-idea', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -64,39 +62,20 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       if (res.ok) {
         const data = await res.json();
         if (data?.formattedText && data.formattedText.trim()) {
-          console.log('[Morning Oracle Client] AI formatted result:', data.formattedText);
+          console.log('[Morning Oracle] AI formatted result:', data.formattedText);
           setTranscript(data.formattedText);
-          accumulatedTextRef.current = data.formattedText;
         }
       }
     } catch (err) {
-      console.warn('[Morning Oracle Client] AI formatting request error:', err);
+      console.warn('[Morning Oracle] AI formatting request error:', err);
     } finally {
       setIsFormatting(false);
     }
   }, []);
 
-  // Cleanup helper to cleanly abort and detach any existing instance
-  const cleanupRecognition = useCallback(() => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.onresult = null;
-        recognitionRef.current.onerror = null;
-        recognitionRef.current.onend = null;
-        recognitionRef.current.onstart = null;
-        recognitionRef.current.abort();
-      } catch (e) {
-        // ignore
-      }
-      recognitionRef.current = null;
-    }
-  }, []);
-
-  // Stop listening cleanly & trigger AI formatting
+  // Stop listening cleanly
   const stopListening = useCallback(() => {
-    isExplicitStopRef.current = true;
     setIsListening(false);
-    setInterimText('');
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -104,15 +83,9 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         // ignore
       }
     }
+  }, []);
 
-    // Format final accumulated text with AI
-    const finalTextToFormat = (transcript + (interimText ? ` ${interimText}` : '')).trim();
-    if (finalTextToFormat) {
-      formatTextWithAI(finalTextToFormat);
-    }
-  }, [transcript, interimText, formatTextWithAI]);
-
-  // Start fresh listening session with environment-specific optimizations
+  // Synchronous Start Handler immediately bound to the user touch/click gesture
   const startListening = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -126,83 +99,50 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     }
 
     setStatusMessage(null);
-    setInterimText('');
-    isExplicitStopRef.current = false;
+    latestCapturedTextRef.current = '';
 
-    // Clean up any previous instance before starting fresh
-    cleanupRecognition();
+    // Abort and discard any existing instance
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch (e) {
+        // ignore
+      }
+      recognitionRef.current = null;
+    }
 
     try {
+      // Instantiate fresh SpeechRecognition synchronously inside click event
       const recognition = new SpeechRecognition();
 
-      // Mobile vs Desktop Detection
-      const isMobile =
-        typeof navigator !== 'undefined' &&
-        /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-      // On Android/Mobile, continuous=false & interimResults=false avoids crash/aborted errors
-      if (isMobile) {
-        recognition.continuous = false;
-        recognition.interimResults = false;
-      } else {
-        recognition.continuous = true;
-        recognition.interimResults = true;
-      }
-
+      // Mobile touch-to-talk configuration:
+      recognition.continuous = false;
+      recognition.interimResults = false;
       recognition.maxAlternatives = 1;
       recognition.lang = selectedLang;
 
       recognition.onstart = () => {
-        console.log(
-          `[Morning Oracle Client] Speech recognition session started (isMobile: ${isMobile}, lang: ${selectedLang})`
-        );
+        console.log('[Morning Oracle] Speech recognition session started with lang:', selectedLang);
         setIsListening(true);
       };
 
       recognition.onresult = (event: any) => {
-        let finalChunk = '';
-        let currentInterim = '';
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const item = event.results[i];
-          const textChunk = item[0]?.transcript || '';
-
-          if (item.isFinal || isMobile) {
-            finalChunk += textChunk;
-          } else {
-            currentInterim += textChunk;
-          }
-        }
-
-        if (finalChunk) {
-          setTranscript((prev) => {
-            const trimmedPrev = prev.trim();
-            const trimmedFinal = finalChunk.trim();
-            const combined = trimmedPrev ? `${trimmedPrev} ${trimmedFinal}` : trimmedFinal;
-            accumulatedTextRef.current = combined;
-            return combined;
-          });
-          setInterimText('');
-
-          // On mobile single-burst capture, automatically invoke AI formatting
-          if (isMobile && finalChunk.trim()) {
-            const fullText = accumulatedTextRef.current || finalChunk.trim();
-            formatTextWithAI(fullText);
-          }
-        } else {
-          setInterimText(currentInterim);
+        const newText = event.results?.[0]?.[0]?.transcript || '';
+        if (newText) {
+          console.log('[Morning Oracle] Captured speech:', newText);
+          latestCapturedTextRef.current = newText;
+          setTranscript((prev) => (prev ? `${prev.trim()} ${newText.trim()}` : newText.trim()));
         }
       };
 
       recognition.onerror = (event: any) => {
-        console.log('[Morning Oracle Client] Speech recognition notice:', event.error);
-
-        // Completely suppress non-critical transient states (aborted, no-speech)
-        if (event.error === 'aborted' || event.error === 'no-speech') {
+        // Completely suppress benign non-critical errors
+        if (event.error === 'no-speech' || event.error === 'aborted') {
           return;
         }
 
-        // Only alert on critical failures
+        console.error('[Morning Oracle] Speech error:', event.error);
+
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
           setIsListening(false);
           setStatusMessage({
@@ -215,30 +155,28 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
             type: 'error',
             text: 'Microphone is unavailable or in use by another application.',
           });
-        } else if (event.error === 'network') {
-          setIsListening(false);
-          setStatusMessage({
-            type: 'error',
-            text: 'Speech recognition network issue. Please check your connection.',
-          });
         }
       };
 
       recognition.onend = () => {
-        console.log('[Morning Oracle Client] Speech recognition session concluded.');
+        console.log('[Morning Oracle] Speech recognition session concluded.');
         setIsListening(false);
-        setInterimText('');
 
-        // Trigger AI formatting automatically after natural speech pause on desktop
-        if (!isExplicitStopRef.current && accumulatedTextRef.current) {
-          formatTextWithAI(accumulatedTextRef.current);
+        // Automatically format with AI if text was captured during the session
+        if (latestCapturedTextRef.current) {
+          const textToFormat = transcript
+            ? `${transcript.trim()} ${latestCapturedTextRef.current.trim()}`
+            : latestCapturedTextRef.current.trim();
+          formatTextWithAI(textToFormat);
         }
       };
 
       recognitionRef.current = recognition;
+
+      // Start recognition synchronously
       recognition.start();
     } catch (err: any) {
-      console.error('[Morning Oracle Client] Exception starting SpeechRecognition:', err);
+      console.error('[Morning Oracle] Exception starting SpeechRecognition:', err);
       setIsListening(false);
       if (err.name !== 'AbortError') {
         setStatusMessage({
@@ -247,7 +185,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         });
       }
     }
-  }, [selectedLang, cleanupRecognition, formatTextWithAI]);
+  }, [selectedLang, transcript, formatTextWithAI]);
 
   // Toggle button handler
   const toggleListening = () => {
@@ -276,14 +214,20 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      cleanupRecognition();
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (e) {
+          // ignore
+        }
+      }
     };
-  }, [cleanupRecognition]);
+  }, []);
 
   // Save idea to Supabase
   const handleSaveIdea = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const cleanText = (transcript + (interimText ? ` ${interimText}` : '')).trim();
+    const cleanText = transcript.trim();
     if (!cleanText) return;
 
     if (isListening) {
@@ -299,7 +243,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     };
 
     try {
-      console.log('[Morning Oracle Client] Inserting idea to Supabase ideas table:', payload);
+      console.log('[Morning Oracle] Inserting idea to Supabase ideas table:', payload);
       const { data, error } = await supabase
         .from('ideas')
         .insert([payload])
@@ -307,7 +251,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         .single();
 
       if (error) {
-        console.error('[Morning Oracle Client] Supabase insert error details:', {
+        console.error('[Morning Oracle] Supabase insert error details:', {
           message: error.message,
           details: error.details,
           hint: error.hint,
@@ -320,14 +264,12 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       }
 
       setTranscript('');
-      setInterimText('');
-      accumulatedTextRef.current = '';
       setStatusMessage({ type: 'success', text: 'Idea captured to Inbox!' });
       if (data) {
         onIdeaSaved(data as Idea);
       }
     } catch (err: any) {
-      console.error('[Morning Oracle Client] Unexpected error saving idea:', err);
+      console.error('[Morning Oracle] Unexpected error saving idea:', err);
       const msg = err?.message || 'Network / server communication error';
       setStatusMessage({ type: 'error', text: msg });
     } finally {
@@ -337,8 +279,6 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
       }, 5000);
     }
   };
-
-  const displayText = transcript + (interimText ? (transcript ? ` ${interimText}` : interimText) : '');
 
   return (
     <section className="w-full max-w-md mx-auto p-4 mb-6">
@@ -446,12 +386,8 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         <form onSubmit={handleSaveIdea} className="space-y-3 mt-4">
           <div className="relative">
             <textarea
-              value={displayText}
-              onChange={(e) => {
-                setTranscript(e.target.value);
-                setInterimText('');
-                accumulatedTextRef.current = e.target.value;
-              }}
+              value={transcript}
+              onChange={(e) => setTranscript(e.target.value)}
               placeholder={
                 selectedLang === 'en-US'
                   ? 'e.g. Buy milk, review quarterly presentation, call team...'
@@ -461,10 +397,10 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
               className="w-full bg-oracle-dark/90 border border-oracle-border focus:border-oracle-cyan focus:ring-1 focus:ring-oracle-cyan/50 rounded-xl p-3 text-sm text-white placeholder-gray-500 outline-none resize-none transition-all"
             />
             <div className="absolute top-2 right-2 flex items-center space-x-1">
-              {displayText.trim() && !isFormatting && (
+              {transcript.trim() && !isFormatting && (
                 <button
                   type="button"
-                  onClick={() => formatTextWithAI(displayText)}
+                  onClick={() => formatTextWithAI(transcript)}
                   className="text-xs text-oracle-cyan hover:text-white px-2 py-0.5 bg-oracle-border/50 hover:bg-oracle-border rounded-md flex items-center space-x-1"
                   title="Format with Gemini AI"
                 >
@@ -472,13 +408,12 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
                   <span className="text-[10px]">AI Fix</span>
                 </button>
               )}
-              {displayText.trim() && (
+              {transcript.trim() && (
                 <button
                   type="button"
                   onClick={() => {
                     setTranscript('');
-                    setInterimText('');
-                    accumulatedTextRef.current = '';
+                    latestCapturedTextRef.current = '';
                   }}
                   className="text-xs text-oracle-muted hover:text-white px-2 py-0.5 bg-oracle-border/50 rounded-md"
                 >
@@ -490,13 +425,13 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
 
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-oracle-muted font-mono">
-              {displayText.trim().length} chars
+              {transcript.trim().length} chars
             </span>
             <button
               type="submit"
-              disabled={!displayText.trim() || isSaving || isFormatting}
+              disabled={!transcript.trim() || isSaving || isFormatting}
               className={`flex items-center space-x-2 px-5 py-2.5 rounded-xl font-semibold text-xs tracking-wide transition-all ${
-                displayText.trim() && !isSaving && !isFormatting
+                transcript.trim() && !isSaving && !isFormatting
                   ? 'bg-oracle-cyan text-oracle-dark hover:bg-cyan-300 shadow-cyan-glow cursor-pointer'
                   : 'bg-oracle-border/50 text-oracle-muted cursor-not-allowed border border-oracle-border'
               }`}
