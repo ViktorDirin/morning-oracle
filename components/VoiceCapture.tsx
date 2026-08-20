@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, MicOff, Send, Sparkles, CheckCircle2, AlertCircle, RefreshCw, Globe, Wand2 } from 'lucide-react';
+import { Mic, MicOff, Send, Sparkles, CheckCircle2, AlertCircle, RefreshCw, Globe, Wand2, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Idea } from '@/lib/types';
 
@@ -10,30 +10,25 @@ interface VoiceCaptureProps {
 }
 
 const SUPPORTED_LANGUAGES = [
-  { code: 'en-US', label: 'EN' },
   { code: 'ru-RU', label: 'RU' },
+  { code: 'en-US', label: 'EN' },
 ];
 
 export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
-  const [isListening, setIsListening] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [selectedLang, setSelectedLang] = useState('en-US');
-  const [isSaving, setIsSaving] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [selectedLang, setSelectedLang] = useState('ru-RU');
+  const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [isSpeechSupported, setIsSpeechSupported] = useState(true);
 
-  const recognitionRef = useRef<any>(null);
-  const latestCapturedTextRef = useRef<string>('');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
-  // Check Web Speech API availability & load persisted language
+  // Load persisted language
   useEffect(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setIsSpeechSupported(false);
-    }
-
     if (typeof window !== 'undefined') {
       try {
         const savedLang = localStorage.getItem('morning_oracle_voice_lang');
@@ -52,7 +47,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
 
     setIsFormatting(true);
     try {
-      console.log('[Morning Oracle] Requesting AI formatting for:', rawText);
+      console.log('[Morning Oracle] Requesting text formatting for:', rawText);
       const res = await fetch('/api/format-idea', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -73,126 +68,163 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     }
   }, []);
 
-  // Stop listening cleanly
-  const stopListening = useCallback(() => {
-    setIsListening(false);
-    if (recognitionRef.current) {
+  // Send recorded audio Blob to backend Gemini transcription endpoint
+  const sendAudioForTranscription = useCallback(
+    async (blob: Blob, mimeType: string) => {
+      if (blob.size < 500) {
+        console.log('[Morning Oracle] Recorded audio chunk too small, skipping transcription.');
+        return;
+      }
+
+      setIsTranscribing(true);
+      setStatusMessage(null);
+
       try {
-        recognitionRef.current.stop();
+        const formData = new FormData();
+        const extension = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+        formData.append('file', blob, `voice_note.${extension}`);
+        formData.append('language', selectedLang === 'en-US' ? 'en' : 'ru');
+
+        console.log(`[Morning Oracle] Sending audio to /api/transcribe (${blob.size} bytes)...`);
+
+        const response = await fetch('/api/transcribe', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData?.error || 'Transcription server error');
+        }
+
+        const data = await response.json();
+        if (data?.formattedText && data.formattedText.trim()) {
+          const cleanText = data.formattedText.trim();
+          console.log('[Morning Oracle] Transcription succeeded:', cleanText);
+          setTranscript((prev) => (prev ? `${prev.trim()} ${cleanText}` : cleanText));
+        } else {
+          console.log('[Morning Oracle] No audible speech recognized.');
+        }
+      } catch (err: any) {
+        console.error('[Morning Oracle] Audio transcription failed:', err);
+        setStatusMessage({
+          type: 'error',
+          text: err.message || 'Failed to transcribe audio. Please try again or type below.',
+        });
+      } finally {
+        setIsTranscribing(false);
+      }
+    },
+    [selectedLang]
+  );
+
+  // Stop recording cleanly
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
       } catch (e) {
-        // ignore
+        console.warn('[Morning Oracle] Error stopping MediaRecorder:', e);
       }
     }
+    setIsRecording(false);
   }, []);
 
-  // Synchronous Start Handler immediately bound to the user touch/click gesture
-  const startListening = useCallback(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  // Start recording using standard MediaRecorder
+  const startRecording = useCallback(async () => {
+    setStatusMessage(null);
+    audioChunksRef.current = [];
 
-    if (!SpeechRecognition) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatusMessage({
         type: 'error',
-        text: 'Voice recognition is not supported in this browser. Please type below.',
+        text: 'Audio recording is not supported in this browser. Please type below.',
       });
       return;
     }
 
-    setStatusMessage(null);
-    latestCapturedTextRef.current = '';
-
-    // Abort and discard any existing instance
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.abort();
-      } catch (e) {
-        // ignore
-      }
-      recognitionRef.current = null;
-    }
-
     try {
-      // Instantiate fresh SpeechRecognition synchronously inside click event
-      const recognition = new SpeechRecognition();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
 
-      // Mobile touch-to-talk configuration:
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.maxAlternatives = 1;
-      recognition.lang = selectedLang;
+      audioStreamRef.current = stream;
 
-      recognition.onstart = () => {
-        console.log('[Morning Oracle] Speech recognition session started with lang:', selectedLang);
-        setIsListening(true);
-      };
+      // Select supported audio mime type
+      let mimeType = 'audio/webm;codecs=opus';
+      if (typeof MediaRecorder.isTypeSupported === 'function') {
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          mimeType = 'audio/webm;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+          mimeType = 'audio/webm';
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+          mimeType = 'audio/mp4';
+        } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
+          mimeType = 'audio/ogg';
+        } else {
+          mimeType = '';
+        }
+      }
 
-      recognition.onresult = (event: any) => {
-        const newText = event.results?.[0]?.[0]?.transcript || '';
-        if (newText) {
-          console.log('[Morning Oracle] Captured speech:', newText);
-          latestCapturedTextRef.current = newText;
-          setTranscript((prev) => (prev ? `${prev.trim()} ${newText.trim()}` : newText.trim()));
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
         }
       };
 
-      recognition.onerror = (event: any) => {
-        // Completely suppress benign non-critical errors
-        if (event.error === 'no-speech' || event.error === 'aborted') {
-          return;
+      recorder.onstop = () => {
+        console.log('[Morning Oracle] MediaRecorder stopped. Assembling audio payload...');
+        const finalType = recorder.mimeType || mimeType || 'audio/webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: finalType });
+
+        // Release hardware mic tracks
+        if (audioStreamRef.current) {
+          audioStreamRef.current.getTracks().forEach((track) => track.stop());
+          audioStreamRef.current = null;
         }
 
-        console.error('[Morning Oracle] Speech error:', event.error);
-
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          setIsListening(false);
-          setStatusMessage({
-            type: 'error',
-            text: 'Microphone permission is required. Please allow access in browser settings.',
-          });
-        } else if (event.error === 'audio-capture') {
-          setIsListening(false);
-          setStatusMessage({
-            type: 'error',
-            text: 'Microphone is unavailable or in use by another application.',
-          });
-        }
+        // Send to backend for AI transcription
+        sendAudioForTranscription(audioBlob, finalType);
       };
 
-      recognition.onend = () => {
-        console.log('[Morning Oracle] Speech recognition session concluded.');
-        setIsListening(false);
-
-        // Automatically format with AI if text was captured during the session
-        if (latestCapturedTextRef.current) {
-          const textToFormat = transcript
-            ? `${transcript.trim()} ${latestCapturedTextRef.current.trim()}`
-            : latestCapturedTextRef.current.trim();
-          formatTextWithAI(textToFormat);
-        }
+      recorder.onerror = (e) => {
+        console.error('[Morning Oracle] MediaRecorder error event:', e);
+        stopRecording();
       };
 
-      recognitionRef.current = recognition;
-
-      // Start recognition synchronously
-      recognition.start();
+      recorder.start(250); // Slice audio every 250ms
+      setIsRecording(true);
+      console.log('[Morning Oracle] MediaRecorder started successfully with mimeType:', recorder.mimeType || mimeType);
     } catch (err: any) {
-      console.error('[Morning Oracle] Exception starting SpeechRecognition:', err);
-      setIsListening(false);
-      if (err.name !== 'AbortError') {
+      console.error('[Morning Oracle] Failed to access microphone:', err);
+      setIsRecording(false);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setStatusMessage({
           type: 'error',
-          text: 'Failed to start voice capture. Please check microphone permissions or type below.',
+          text: 'Microphone permission is required. Please grant access in your browser settings.',
+        });
+      } else {
+        setStatusMessage({
+          type: 'error',
+          text: 'Could not access microphone hardware. Please check your device settings.',
         });
       }
     }
-  }, [selectedLang, transcript, formatTextWithAI]);
+  }, [sendAudioForTranscription, stopRecording]);
 
   // Toggle button handler
-  const toggleListening = () => {
-    if (isListening) {
-      stopListening();
+  const toggleRecording = () => {
+    if (isRecording) {
+      stopRecording();
     } else {
-      startListening();
+      startRecording();
     }
   };
 
@@ -206,20 +238,23 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         // ignore
       }
     }
-    if (isListening) {
-      stopListening();
+    if (isRecording) {
+      stopRecording();
     }
   };
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (recognitionRef.current) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         try {
-          recognitionRef.current.abort();
+          mediaRecorderRef.current.stop();
         } catch (e) {
           // ignore
         }
+      }
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
   }, []);
@@ -230,8 +265,8 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     const cleanText = transcript.trim();
     if (!cleanText) return;
 
-    if (isListening) {
-      stopListening();
+    if (isRecording) {
+      stopRecording();
     }
 
     setIsSaving(true);
@@ -286,10 +321,12 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         {/* Glow effect backdrop */}
         <div
           className={`absolute -top-24 -right-24 w-48 h-48 rounded-full blur-3xl transition-opacity duration-500 pointer-events-none ${
-            isListening
-              ? 'bg-oracle-cyan/30 opacity-100'
+            isRecording
+              ? 'bg-oracle-magenta/35 opacity-100 animate-pulse'
+              : isTranscribing
+              ? 'bg-oracle-cyan/30 opacity-100 animate-pulse'
               : isFormatting
-              ? 'bg-oracle-magenta/25 opacity-100'
+              ? 'bg-oracle-cyan/20 opacity-80'
               : 'bg-oracle-cyan/10 opacity-50'
           }`}
         />
@@ -303,7 +340,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
           </div>
 
           <div className="flex items-center space-x-2">
-            {/* Language Selector: EN & RU */}
+            {/* Language Selector: RU & EN */}
             <div className="flex items-center bg-oracle-dark rounded-lg p-0.5 border border-oracle-border/60 text-[10px] font-mono">
               <Globe className="w-3 h-3 text-oracle-muted mx-1" />
               {SUPPORTED_LANGUAGES.map((lang) => (
@@ -325,14 +362,22 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
 
             <span
               className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded-full border transition-all ${
-                isListening
+                isRecording
+                  ? 'bg-oracle-magenta/20 border-oracle-magenta text-oracle-magenta animate-pulse'
+                  : isTranscribing
                   ? 'bg-oracle-cyan/20 border-oracle-cyan text-oracle-cyan animate-pulse'
                   : isFormatting
-                  ? 'bg-oracle-magenta/20 border-oracle-magenta text-oracle-magenta animate-pulse'
+                  ? 'bg-oracle-cyan/20 border-oracle-cyan text-oracle-cyan'
                   : 'bg-oracle-card border-oracle-border text-oracle-muted'
               }`}
             >
-              {isListening ? 'Listening...' : isFormatting ? 'Formatting...' : 'Ready'}
+              {isRecording
+                ? 'Recording...'
+                : isTranscribing
+                ? 'Transcribing...'
+                : isFormatting
+                ? 'Formatting...'
+                : 'Ready'}
             </span>
           </div>
         </div>
@@ -340,44 +385,56 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         {/* Mic Button area */}
         <div className="flex flex-col items-center justify-center my-4">
           <div className="relative">
-            {isListening && (
+            {isRecording && (
               <>
-                <span className="absolute inset-0 rounded-full border-2 border-oracle-cyan animate-ping opacity-75" />
-                <span className="absolute -inset-2 rounded-full bg-oracle-cyan/20 animate-pulse" />
+                <span className="absolute inset-0 rounded-full border-2 border-oracle-magenta animate-ping opacity-75" />
+                <span className="absolute -inset-2 rounded-full bg-oracle-magenta/25 animate-pulse" />
               </>
             )}
             <button
-              onClick={toggleListening}
+              onClick={toggleRecording}
+              disabled={isTranscribing}
               type="button"
               className={`relative z-10 w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 transform active:scale-95 ${
-                isListening
-                  ? 'bg-oracle-cyan text-oracle-dark shadow-cyan-glow scale-105'
-                  : isFormatting
-                  ? 'bg-oracle-card border-2 border-oracle-magenta text-oracle-magenta shadow-magenta-glow'
+                isRecording
+                  ? 'bg-oracle-magenta text-white shadow-magenta-glow scale-105'
+                  : isTranscribing
+                  ? 'bg-oracle-card border-2 border-oracle-cyan text-oracle-cyan shadow-cyan-glow cursor-wait'
                   : 'bg-oracle-card border-2 border-oracle-border hover:border-oracle-cyan text-oracle-cyan hover:shadow-cyan-glow'
               }`}
-              title={isListening ? 'Stop listening' : `Start voice recording (${selectedLang})`}
+              title={
+                isRecording
+                  ? 'Tap to stop recording'
+                  : isTranscribing
+                  ? 'Transcribing audio with Gemini...'
+                  : `Tap to record audio (${selectedLang})`
+              }
             >
-              {isListening ? (
+              {isRecording ? (
                 <MicOff className="w-8 h-8 animate-bounce" />
-              ) : isFormatting ? (
-                <Wand2 className="w-8 h-8 animate-spin text-oracle-magenta" />
+              ) : isTranscribing ? (
+                <Loader2 className="w-8 h-8 animate-spin text-oracle-cyan" />
               ) : (
                 <Mic className="w-8 h-8" />
               )}
             </button>
           </div>
           <p className="text-xs text-oracle-muted mt-3 text-center flex items-center justify-center gap-1.5">
-            {isListening ? (
-              <span>Listening in {selectedLang === 'en-US' ? 'English' : 'Russian'}... (tap to finish)</span>
-            ) : isFormatting ? (
+            {isRecording ? (
               <span className="text-oracle-magenta font-mono animate-pulse">
+                Recording audio... (tap to finish)
+              </span>
+            ) : isTranscribing ? (
+              <span className="text-oracle-cyan font-mono animate-pulse flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Transcribing with Gemini AI... ✨
+              </span>
+            ) : isFormatting ? (
+              <span className="text-oracle-cyan font-mono animate-pulse">
                 Polishing punctuation with AI... ✨
               </span>
-            ) : isSpeechSupported ? (
-              <span>Tap the microphone or type below</span>
             ) : (
-              <span>Voice recognition unavailable. Type below:</span>
+              <span>Tap microphone to record voice note</span>
             )}
           </p>
         </div>
@@ -397,7 +454,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
               className="w-full bg-oracle-dark/90 border border-oracle-border focus:border-oracle-cyan focus:ring-1 focus:ring-oracle-cyan/50 rounded-xl p-3 text-sm text-white placeholder-gray-500 outline-none resize-none transition-all"
             />
             <div className="absolute top-2 right-2 flex items-center space-x-1">
-              {transcript.trim() && !isFormatting && (
+              {transcript.trim() && !isFormatting && !isTranscribing && (
                 <button
                   type="button"
                   onClick={() => formatTextWithAI(transcript)}
@@ -411,10 +468,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
               {transcript.trim() && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setTranscript('');
-                    latestCapturedTextRef.current = '';
-                  }}
+                  onClick={() => setTranscript('')}
                   className="text-xs text-oracle-muted hover:text-white px-2 py-0.5 bg-oracle-border/50 rounded-md"
                 >
                   Clear
@@ -429,9 +483,9 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
             </span>
             <button
               type="submit"
-              disabled={!transcript.trim() || isSaving || isFormatting}
+              disabled={!transcript.trim() || isSaving || isTranscribing || isFormatting}
               className={`flex items-center space-x-2 px-5 py-2.5 rounded-xl font-semibold text-xs tracking-wide transition-all ${
-                transcript.trim() && !isSaving && !isFormatting
+                transcript.trim() && !isSaving && !isTranscribing && !isFormatting
                   ? 'bg-oracle-cyan text-oracle-dark hover:bg-cyan-300 shadow-cyan-glow cursor-pointer'
                   : 'bg-oracle-border/50 text-oracle-muted cursor-not-allowed border border-oracle-border'
               }`}
@@ -441,10 +495,15 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                   <span>Saving...</span>
                 </>
+              ) : isTranscribing ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-oracle-dark" />
+                  <span>Transcribing...</span>
+                </>
               ) : isFormatting ? (
                 <>
                   <Wand2 className="w-3.5 h-3.5 animate-spin text-oracle-dark" />
-                  <span>AI Formatting...</span>
+                  <span>Formatting...</span>
                 </>
               ) : (
                 <>
@@ -456,7 +515,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
           </div>
         </form>
 
-        {/* Status Toast / Detailed Error Display */}
+        {/* Status Toast / Error Display */}
         {statusMessage && (
           <div
             className={`mt-3 p-3 rounded-xl text-xs flex items-start space-x-2 animate-fadeIn ${
