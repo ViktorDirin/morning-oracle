@@ -112,7 +112,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     }
   }, [transcript, interimText, formatTextWithAI]);
 
-  // Start fresh listening session
+  // Start fresh listening session with environment-specific optimizations
   const startListening = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -135,13 +135,27 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
     try {
       const recognition = new SpeechRecognition();
 
-      recognition.continuous = false;
-      recognition.interimResults = true;
+      // Mobile vs Desktop Detection
+      const isMobile =
+        typeof navigator !== 'undefined' &&
+        /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+      // On Android/Mobile, continuous=false & interimResults=false avoids crash/aborted errors
+      if (isMobile) {
+        recognition.continuous = false;
+        recognition.interimResults = false;
+      } else {
+        recognition.continuous = true;
+        recognition.interimResults = true;
+      }
+
       recognition.maxAlternatives = 1;
       recognition.lang = selectedLang;
 
       recognition.onstart = () => {
-        console.log('[Morning Oracle Client] Speech recognition session started with lang:', selectedLang);
+        console.log(
+          `[Morning Oracle Client] Speech recognition session started (isMobile: ${isMobile}, lang: ${selectedLang})`
+        );
         setIsListening(true);
       };
 
@@ -153,7 +167,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
           const item = event.results[i];
           const textChunk = item[0]?.transcript || '';
 
-          if (item.isFinal) {
+          if (item.isFinal || isMobile) {
             finalChunk += textChunk;
           } else {
             currentInterim += textChunk;
@@ -169,6 +183,12 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
             return combined;
           });
           setInterimText('');
+
+          // On mobile single-burst capture, automatically invoke AI formatting
+          if (isMobile && finalChunk.trim()) {
+            const fullText = accumulatedTextRef.current || finalChunk.trim();
+            formatTextWithAI(fullText);
+          }
         } else {
           setInterimText(currentInterim);
         }
@@ -209,7 +229,7 @@ export function VoiceCapture({ onIdeaSaved }: VoiceCaptureProps) {
         setIsListening(false);
         setInterimText('');
 
-        // Trigger AI formatting automatically after natural speech pause
+        // Trigger AI formatting automatically after natural speech pause on desktop
         if (!isExplicitStopRef.current && accumulatedTextRef.current) {
           formatTextWithAI(accumulatedTextRef.current);
         }
