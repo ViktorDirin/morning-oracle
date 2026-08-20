@@ -1,4 +1,3 @@
-
 # Morning Oracle — Project Roadmap & Backlog
 
 ## Overview
@@ -7,39 +6,62 @@ This document tracks the phased development, architecture decisions, and planned
 ---
 
 ## [x] Version 1.0 — MVP Core & Alarm System (Completed)
-- [x] **Voice Capture:** Browser Web Speech API implementation for speech-to-text dictation (RU/EN/UA).
+- [x] **Voice Capture:** Browser Web Speech API implementation for speech-to-text dictation (RU/EN).
 - [x] **Task Flow:** Dual-tier list (`Inbox` & `Tomorrow`) with Supabase Database sync.
 - [x] **Backend Pipeline:** Nightly Python worker on Oracle Cloud generating summary via Gemini API and neural TTS via `edge-tts` (`ru-RU-SvetlanaNeural`).
 - [x] **Storage Sync:** Automated upload of `today_news.mp3` to Supabase Storage with cache-busting URLs.
-- [x] **Morning Player Engine:** 3-stage sequential playback (countdown chime -> AI news stream -> browser task synthesis).
+- [x] **Morning Player Engine:** 3-stage sequential playback (countdown chime -> AI news stream -> task synthesis).
 - [x] **Alarm Engine:** Live interval timer, nightstand mode via Wake Lock API, and persistent settings.
 - [x] **PWA & Production:** Full Progressive Web App manifest/service worker and Vercel production deployment.
 
 ---
 
-## [ ] Version 1.1 — Content Quality, Voice Polish & Language Switch (Current Priority)
-
-### 1. AI News Digest Refinement & Tone Overhaul
-- [ ] **Geopolitical / Conflict Blacklist:** Update the Gemini prompt to strictly exclude military, war, and political conflict news (including Ukraine/Russia war coverage).
-- [ ] **Frontier AI & Vibe-coding Focus:** Add dedicated RSS feeds (Hacker News AI, VentureBeat AI, TechCrunch AI) prioritizing new model releases, image/video generation tools, vibecoding setups, and LLM updates.
-- [ ] **Engaging Host Persona:** Shift Gemini's role from "dry newsreader" to "charismatic tech-radio host" with an energetic, witty morning vibe.
-- [ ] **Weather Integration:** Include brief local weather conditions at the start of the audio digest.
-
-### 2. Voice Capture & Task Readout Flow
-- [ ] **AI-Powered Voice Post-Processing:** Run voice transcripts through a lightweight Gemini micro-prompt to automatically insert punctuation, capital letters, and split text into clean sentences.
-- [ ] **Android Chrome / Pixel Microphone Fix:** Ensure robust permissions lifecycle, event cleanup, and explicit audio constraints in `VoiceCapture.tsx`.
-- [ ] **Structured Task Cadence (Stage 3):** Format task lists with numbered speech cues and breathing pauses (*"Here is your plan for today. [pause] Task one: ... [pause] Task two: ..."*).
-
-### 3. Multi-Language Audio Toggle (RU / EN)
-- [ ] **Settings Language Switch:** Add a `Language (RU/EN)` toggle in `SettingsModal.tsx` synced to Supabase `settings`.
-- [ ] **Dual Neural Voices (`edge-tts`):**
-  - Russian: `ru-RU-SvetlanaNeural`
-  - English: `en-US-JennyNeural`
-- [ ] **Dynamic Language Routing:** `cron_worker.py` and `MorningPlayer.tsx` adjust prompt generation and speech synthesis based on the selected language.
+## [x] Version 1.1 — Content Polish & Multi-Language Digest (Completed)
+- [x] **Multi-Language Audio Switch (RU / EN):**
+  - Added `Morning Digest Language (RU/EN)` toggle in `SettingsModal.tsx` synced to `localStorage`.
+  - Dynamic stream selection in `MorningPlayer.tsx` (`today_news_en.mp3` vs `today_news.mp3`).
+  - Localized Stage 3 task speech queues with natural pacing (`rate: 0.95`, `pitch: 1.0`).
+- [x] **Structured Task Cadence (Stage 3):**
+  - Direct introductory cue (*"Твой список задач."* / *"Your task list."*).
+  - Clean ~500ms pauses between consecutive tasks with live UI task highlighting.
+- [x] **AI-Powered Voice Post-Processing:**
+  - Dedicated `/api/format-idea` Next.js endpoint powered by `gemini-3.6-flash` for capitalization, punctuation, and grammar cleanup.
 
 ---
 
-## [ ] Version 1.2 — UI Enhancements & Task Management
-- [ ] **Task CRUD:** Add quick inline text editing and one-tap task deletion directly in the UI.
-- [ ] **Broadcast Transcript Archive:** Display the full text transcript of the morning news digest inside the application.
+## [x] Version 1.2 — Mobile Audio Capture & Multimodal Breakthrough (Completed)
+- [x] **Standard MediaRecorder Stream Capture:**
+  - Completely replaced unreliable `webkitSpeechRecognition` with cross-platform HTML5 `MediaRecorder`.
+  - Eliminated hardware audio pipeline lock conflicts and `Speech error: aborted` drops on mobile Android/Google Pixel devices.
+- [x] **Server-Side Multimodal Audio Transcription (`/api/transcribe`):**
+  - Next.js server endpoint processing base64 WebM/Opus audio buffers directly via `gemini-3.6-flash`.
+  - Zero-latency verbatim transcription with automatic capitalization, punctuation formatting, and ambient noise suppression.
+
+---
+
+## [ ] Version 1.3 — AI Assistant Tasks Briefing (Current Priority)
+
+### 1. Conversational Task Script Generator (`/api/generate-tasks-briefing`)
+- [ ] **Context Ingestion:** Fetch and ingest all active tasks from the `Tomorrow` category.
+- [ ] **Role-Engineered Persona Prompt:**
+  - Charismatic, caring, slightly witty personal female assistant persona.
+  - Generates a cohesive 30–50s spoken morning briefing monologue seamlessly connecting tasks instead of robotic list numbering.
+  - Dual-language support (`RU` / `EN`) matching the user's active digest language preference.
+
+### 2. Audio Synthesis & Storage Pipeline
+- [ ] **Edge-TTS Neural Voice Generation:**
+  - Russian: `ru-RU-SvetlanaNeural`
+  - English: `en-US-JennyNeural`
+- [ ] **Storage Sync:**
+  - Stream and save the personal task briefing directly to Supabase Storage bucket `morning_audio` as `today_tasks.mp3` and `today_tasks_en.mp3`.
+
+### 3. Interactive Task UI & Smart Alarm Integration
+- [ ] **Interactive Task Hub:** Add `[ ✨ AI Briefing ]` action button in the `Tomorrow` tasks tab with live generation progress & audio preview player.
+- [ ] **Morning Player Upgrade (Stage 3):** Play the generated personal assistant audio briefing as a first-class MP3 stream before falling back to browser speech synthesis.
+
+---
+
+## [ ] Version 1.4 — Advanced Management & Analytics
+- [ ] **Task CRUD:** Inline text editing and batch archiving directly in the UI.
+- [ ] **Broadcast Transcript Archive:** Display full text transcripts of the morning news and task broadcasts inside the app.
 - [ ] **Audio Speed Controller:** Add playback speed controls (`1.0x`, `1.2x`, `1.5x`) inside `MorningPlayer.tsx`.

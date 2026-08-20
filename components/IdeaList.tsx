@@ -1,7 +1,22 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Inbox, Sun, Trash2, CheckCircle2, ArrowRight, RefreshCw, Calendar, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Inbox,
+  Sun,
+  Trash2,
+  CheckCircle2,
+  ArrowRight,
+  RefreshCw,
+  Calendar,
+  Sparkles,
+  Play,
+  Pause,
+  Volume2,
+  Loader2,
+  Headphones,
+  Check
+} from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { Idea, IdeaStatus } from '@/lib/types';
 
@@ -21,23 +36,118 @@ export function IdeaList({
   onDeleteIdea,
 }: IdeaListProps) {
   const [activeTab, setActiveTab] = useState<'inbox' | 'tomorrow' | 'all'>('inbox');
+  const [isGeneratingBriefing, setIsGeneratingBriefing] = useState(false);
+  const [briefingAudioUrl, setBriefingAudioUrl] = useState<string | null>(null);
+  const [briefingScript, setBriefingScript] = useState<string | null>(null);
+  const [isPlayingBriefing, setIsPlayingBriefing] = useState(false);
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
+
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const filteredIdeas = ideas.filter((idea) => {
     if (activeTab === 'all') return true;
     return idea.status === activeTab;
   });
 
+  const tomorrowTasks = ideas.filter((i) => i.status === 'tomorrow');
   const inboxCount = ideas.filter((i) => i.status === 'inbox').length;
-  const tomorrowCount = ideas.filter((i) => i.status === 'tomorrow').length;
+  const tomorrowCount = tomorrowTasks.length;
 
   const formatDate = (isoString: string) => {
     try {
       const date = new Date(isoString);
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' · ' + date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      return (
+        date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) +
+        ' · ' +
+        date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      );
     } catch {
       return isoString;
     }
   };
+
+  // Generate AI Assistant Tasks Briefing
+  const handleGenerateBriefing = async () => {
+    setIsGeneratingBriefing(true);
+    setStatusNotice(null);
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      setIsPlayingBriefing(false);
+    }
+
+    const digestLang =
+      typeof window !== 'undefined'
+        ? localStorage.getItem('oracle_digest_lang') || 'ru'
+        : 'ru';
+
+    try {
+      console.log('[Morning Oracle] Requesting AI Task Briefing generation...');
+      const response = await fetch('/api/generate-tasks-briefing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tasks: tomorrowTasks,
+          lang: digestLang,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to generate task briefing');
+      }
+
+      console.log('[Morning Oracle] Briefing generation succeeded:', data);
+      setBriefingAudioUrl(data.audioUrl);
+      setBriefingScript(data.script);
+      setStatusNotice('AI Assistant briefing generated successfully!');
+    } catch (err: any) {
+      console.error('[Morning Oracle] Briefing generation error:', err);
+      setStatusNotice('Error generating briefing: ' + (err.message || 'Server error'));
+    } finally {
+      setIsGeneratingBriefing(false);
+      setTimeout(() => setStatusNotice(null), 6000);
+    }
+  };
+
+  // Toggle preview audio playback
+  const togglePlayBriefing = () => {
+    if (!briefingAudioUrl) return;
+
+    if (!previewAudioRef.current) {
+      const audio = new Audio(briefingAudioUrl);
+      previewAudioRef.current = audio;
+
+      audio.onended = () => {
+        setIsPlayingBriefing(false);
+      };
+      audio.onerror = () => {
+        setIsPlayingBriefing(false);
+      };
+    }
+
+    if (isPlayingBriefing) {
+      previewAudioRef.current.pause();
+      setIsPlayingBriefing(false);
+    } else {
+      previewAudioRef.current.currentTime = 0;
+      previewAudioRef.current
+        .play()
+        .then(() => setIsPlayingBriefing(true))
+        .catch((e) => {
+          console.warn('[Morning Oracle] Preview audio play error:', e);
+          setIsPlayingBriefing(false);
+        });
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <section className="w-full max-w-md mx-auto p-4">
@@ -49,13 +159,41 @@ export function IdeaList({
             Captured Ideas
           </h2>
         </div>
-        <button
-          onClick={onRefresh}
-          className="p-1.5 rounded-lg bg-oracle-card border border-oracle-border text-oracle-muted hover:text-oracle-cyan transition"
-          title="Refresh list"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-oracle-cyan' : ''}`} />
-        </button>
+
+        <div className="flex items-center space-x-2">
+          {activeTab === 'tomorrow' && (
+            <button
+              onClick={handleGenerateBriefing}
+              disabled={isGeneratingBriefing}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold tracking-wide transition-all ${
+                isGeneratingBriefing
+                  ? 'bg-oracle-cyan/20 border border-oracle-cyan text-oracle-cyan cursor-wait animate-pulse'
+                  : 'bg-gradient-to-r from-oracle-cyan/20 to-oracle-magenta/20 hover:from-oracle-cyan/30 hover:to-oracle-magenta/30 border border-oracle-cyan/50 text-oracle-cyan shadow-cyan-glow'
+              }`}
+              title="Generate personal AI assistant spoken briefing for tomorrow"
+            >
+              {isGeneratingBriefing ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Crafting Audio...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5 text-oracle-cyan" />
+                  <span>✨ AI Briefing</span>
+                </>
+              )}
+            </button>
+          )}
+
+          <button
+            onClick={onRefresh}
+            className="p-1.5 rounded-lg bg-oracle-card border border-oracle-border text-oracle-muted hover:text-oracle-cyan transition"
+            title="Refresh list"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-oracle-cyan' : ''}`} />
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -105,6 +243,53 @@ export function IdeaList({
         </button>
       </div>
 
+      {/* Generated AI Briefing Preview Banner (Tomorrow Tab) */}
+      {activeTab === 'tomorrow' && briefingAudioUrl && (
+        <div className="mb-4 p-3.5 rounded-2xl glass-card border border-oracle-cyan/50 bg-oracle-card/90 shadow-cyan-glow animate-fadeIn">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center space-x-2">
+              <div className="w-6 h-6 rounded-lg bg-oracle-cyan/20 border border-oracle-cyan/40 flex items-center justify-center">
+                <Headphones className="w-3.5 h-3.5 text-oracle-cyan" />
+              </div>
+              <span className="text-xs font-bold text-white tracking-wide uppercase">
+                Assistant Task Briefing Ready
+              </span>
+            </div>
+
+            <button
+              onClick={togglePlayBriefing}
+              className="flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-oracle-cyan text-oracle-dark font-bold text-xs hover:bg-cyan-300 transition shadow-sm"
+            >
+              {isPlayingBriefing ? (
+                <>
+                  <Pause className="w-3.5 h-3.5 fill-current" />
+                  <span>Pause</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Preview Audio</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {briefingScript && (
+            <p className="text-[11px] text-gray-300 italic bg-oracle-dark/70 p-2.5 rounded-xl border border-oracle-border/60 leading-relaxed">
+              &quot;{briefingScript}&quot;
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Notice Message */}
+      {statusNotice && (
+        <div className="mb-3 p-2.5 rounded-xl bg-oracle-dark/90 border border-oracle-cyan/40 text-oracle-cyan text-xs font-mono flex items-center space-x-2 animate-fadeIn">
+          <Sparkles className="w-3.5 h-3.5 shrink-0" />
+          <span>{statusNotice}</span>
+        </div>
+      )}
+
       {/* Ideas List */}
       {isLoading && ideas.length === 0 ? (
         <div className="glass-card rounded-2xl p-8 flex flex-col items-center justify-center text-center">
@@ -119,7 +304,7 @@ export function IdeaList({
             {activeTab === 'inbox'
               ? 'Use voice or typing above to record new ideas!'
               : activeTab === 'tomorrow'
-              ? 'Move ideas here from Inbox to include them in tomorrow morning briefing.'
+              ? 'Move ideas here from Inbox to generate an AI assistant morning audio briefing.'
               : 'Your captured thoughts will appear here.'}
           </p>
         </div>

@@ -38,6 +38,11 @@ const REMOTE_NEWS_AUDIO_RU =
 const REMOTE_NEWS_AUDIO_EN =
   'https://ignakecyqbkwznubymue.supabase.co/storage/v1/object/public/morning_audio/today_news_en.mp3';
 
+const REMOTE_TASKS_AUDIO_RU =
+  'https://ignakecyqbkwznubymue.supabase.co/storage/v1/object/public/morning_audio/today_tasks.mp3';
+const REMOTE_TASKS_AUDIO_EN =
+  'https://ignakecyqbkwznubymue.supabase.co/storage/v1/object/public/morning_audio/today_tasks_en.mp3';
+
 const TOPIC_NAMES_RU: Record<string, string> = {
   technology: 'технологии',
   ai: 'искусственный интеллект',
@@ -138,6 +143,7 @@ export function MorningPlayer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [track2Duration, setTrack2Duration] = useState(25);
+  const [track3Duration, setTrack3Duration] = useState(20);
   const [isCompleted, setIsCompleted] = useState(false);
   const [activeTaskIndex, setActiveTaskIndex] = useState<number | null>(null);
   const [digestLang, setDigestLang] = useState<'ru' | 'en'>('ru');
@@ -148,6 +154,7 @@ export function MorningPlayer({
   const activeTrackIndexRef = useRef(0);
   const chimeAudioRef = useRef<HTMLAudioElement | null>(null);
   const newsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const tasksAudioRef = useRef<HTMLAudioElement | null>(null);
   const progressTimerRef = useRef<any>(null);
   const isTaskSpeechAbortedRef = useRef(false);
   const wasOpenRef = useRef(false);
@@ -207,10 +214,10 @@ export function MorningPlayer({
     },
     {
       id: 'track-3',
-      title: `${tasksToSpeakRef.current.length > 0 ? tasksToSpeakRef.current.length : '0'} Priority Items for Today`,
+      title: `AI Assistant Briefing (${tasksToSpeakRef.current.length} tasks)`,
       category: "Today's Tasks Breakdown",
       iconType: 'tasks',
-      estimatedDuration: tasksToSpeakRef.current.length > 0 ? Math.max(12, tasksToSpeakRef.current.length * 6) : 6,
+      estimatedDuration: track3Duration,
     },
   ];
 
@@ -264,6 +271,14 @@ export function MorningPlayer({
       newsAudioRef.current.onerror = null;
       newsAudioRef.current.ontimeupdate = null;
       newsAudioRef.current = null;
+    }
+    if (tasksAudioRef.current) {
+      tasksAudioRef.current.pause();
+      tasksAudioRef.current.currentTime = 0;
+      tasksAudioRef.current.onended = null;
+      tasksAudioRef.current.onerror = null;
+      tasksAudioRef.current.ontimeupdate = null;
+      tasksAudioRef.current = null;
     }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -326,8 +341,8 @@ export function MorningPlayer({
     }
   }, [stopCurrentAudio]);
 
-  // Stage 3: Sequential Task Readout Engine with Multi-language support & 500ms Pauses
-  const playSequentialTaskSpeech = useCallback(async () => {
+  // Stage 3 Fallback: Sequential Task Readout via SpeechSynthesis
+  const playSequentialTaskSpeechFallback = useCallback(async () => {
     isTaskSpeechAbortedRef.current = false;
     setActiveTaskIndex(null);
 
@@ -335,10 +350,9 @@ export function MorningPlayer({
     const isEn = digestLang === 'en';
     const speechLang = isEn ? 'en-US' : 'ru-RU';
 
-    console.log(`[Morning Oracle Stage 3] Starting sequential task readout (${speechLang}):`, currentTasks);
+    console.log(`[Morning Oracle Stage 3] Starting fallback task readout (${speechLang}):`, currentTasks);
 
     if (currentTasks.length === 0) {
-      // Empty task list case
       const emptyPhrase = isEn
         ? 'Your task list is empty. Have a great day!'
         : 'Список задач пуст. Отличного дня!';
@@ -349,20 +363,15 @@ export function MorningPlayer({
       return;
     }
 
-    // 1. Introductory Cue (Language Specific)
     const introPhrase = isEn ? 'Your task list.' : 'Твой список задач.';
     await speakTextChunk(introPhrase, speechLang);
 
     if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) return;
 
-    // ~500ms pause after intro cue
     await new Promise((r) => setTimeout(r, 500));
 
-    // 2. Iterate through each task sequentially with ~500ms pauses
     for (let i = 0; i < currentTasks.length; i++) {
-      if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) {
-        break;
-      }
+      if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) break;
 
       setActiveTaskIndex(i);
       const task = currentTasks[i];
@@ -372,11 +381,8 @@ export function MorningPlayer({
 
       await speakTextChunk(taskSpeechText, speechLang);
 
-      if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) {
-        break;
-      }
+      if (isTaskSpeechAbortedRef.current || activeTrackIndexRef.current !== 2) break;
 
-      // ~500ms clean delay between tasks
       if (i < currentTasks.length - 1) {
         await new Promise((r) => setTimeout(r, 500));
       }
@@ -385,10 +391,61 @@ export function MorningPlayer({
     setActiveTaskIndex(null);
 
     if (!isTaskSpeechAbortedRef.current && activeTrackIndexRef.current === 2) {
-      console.log('[Morning Oracle Stage 3] All tasks read. Concluding broadcast.');
+      console.log('[Morning Oracle Stage 3] Fallback tasks speech concluded.');
       advanceToNextTrack();
     }
   }, [digestLang, speakTextChunk, advanceToNextTrack]);
+
+  // Stage 3 Primary: Play generated personal assistant MP3 from Supabase Storage
+  const playStage3TasksAudio = useCallback(() => {
+    const isEn = digestLang === 'en';
+    const primaryTasksAudioUrl = isEn
+      ? `${REMOTE_TASKS_AUDIO_EN}?t=${Date.now()}`
+      : `${REMOTE_TASKS_AUDIO_RU}?t=${Date.now()}`;
+
+    console.log('[Morning Oracle Stage 3] Attempting to stream personal assistant MP3 from:', primaryTasksAudioUrl);
+
+    const audio = new Audio(primaryTasksAudioUrl);
+    tasksAudioRef.current = audio;
+
+    audio.onloadedmetadata = () => {
+      const dur = Math.ceil(audio.duration);
+      if (dur && !isNaN(dur)) {
+        setTrack3Duration(dur);
+        console.log('[Morning Oracle Stage 3] Task briefing audio duration:', dur);
+      }
+    };
+
+    audio.ontimeupdate = () => {
+      if (activeTrackIndexRef.current === 2) {
+        setProgress(Math.floor(audio.currentTime));
+      }
+    };
+
+    audio.onended = () => {
+      console.log('[Morning Oracle Stage 3] Personal assistant audio finished. Concluding broadcast.');
+      if (activeTrackIndexRef.current === 2) {
+        advanceToNextTrack();
+      }
+    };
+
+    audio.onerror = (e) => {
+      console.warn('[Morning Oracle Stage 3] Assistant MP3 unavailable or failed to load. Switching to TTS fallback:', e);
+      if (activeTrackIndexRef.current === 2) {
+        playSequentialTaskSpeechFallback();
+      }
+    };
+
+    audio
+      .play()
+      .then(() => {
+        console.log('[Morning Oracle Stage 3] Assistant MP3 playback started successfully.');
+      })
+      .catch((err) => {
+        console.warn('[Morning Oracle Stage 3] MP3 play blocked. Falling back to speech synthesis:', err);
+        playSequentialTaskSpeechFallback();
+      });
+  }, [digestLang, playSequentialTaskSpeechFallback, advanceToNextTrack]);
 
   // Track 2 Speech fallback
   const playNewsSpeechFallback = useCallback(async () => {
@@ -397,14 +454,16 @@ export function MorningPlayer({
 
     let textToSpeak = '';
     if (isEn) {
-      const topicsEn = newsTopics.length > 0
-        ? newsTopics.map((t) => TOPIC_NAMES_EN[t] || t).join(', ')
-        : 'technology, artificial intelligence and world news';
+      const topicsEn =
+        newsTopics.length > 0
+          ? newsTopics.map((t) => TOPIC_NAMES_EN[t] || t).join(', ')
+          : 'technology, artificial intelligence and world news';
       textToSpeak = `Good morning! Here is your personalized Morning Oracle digest. Key updates across your topics: ${topicsEn}. All systems are nominal, have a productive day ahead.`;
     } else {
-      const topicsRu = newsTopics.length > 0
-        ? newsTopics.map((t) => TOPIC_NAMES_RU[t] || t).join(', ')
-        : 'технологии, искусственный интеллект и мировые события';
+      const topicsRu =
+        newsTopics.length > 0
+          ? newsTopics.map((t) => TOPIC_NAMES_RU[t] || t).join(', ')
+          : 'технологии, искусственный интеллект и мировые события';
       textToSpeak = `Доброе утро! Это ваш персональный утренний дайджест Морнинг Оракул. Главные события по вашим темам: ${topicsRu}. Все системы работают в штатном режиме, впереди продуктивный день.`;
     }
 
@@ -435,7 +494,6 @@ export function MorningPlayer({
           });
         }
 
-        // Smooth 5-second countdown timer
         progressTimerRef.current = setInterval(() => {
           setProgress((prev) => {
             const next = prev + 1;
@@ -450,7 +508,7 @@ export function MorningPlayer({
           });
         }, 1000);
       } else if (trackIdx === 1) {
-        // Track 2: Remote Supabase MP3 Broadcast (Language specific with fallback)
+        // Track 2: Remote Supabase MP3 Broadcast
         const primaryNewsUrl =
           digestLang === 'en'
             ? `${REMOTE_NEWS_AUDIO_EN}?t=${Date.now()}`
@@ -485,8 +543,6 @@ export function MorningPlayer({
         audio.onerror = (e) => {
           console.warn('[Morning Oracle] Track 2 remote MP3 failed. Trying fallback/TTS:', e);
           if (digestLang === 'en') {
-            // Try Russian broadcast file as intermediate fallback if English MP3 is not yet ready
-            console.log('[Morning Oracle] Attempting fallback to default today_news.mp3...');
             const fallbackAudio = new Audio(`${REMOTE_NEWS_AUDIO_RU}?t=${Date.now()}`);
             newsAudioRef.current = fallbackAudio;
 
@@ -527,17 +583,12 @@ export function MorningPlayer({
             playNewsSpeechFallback();
           });
       } else if (trackIdx === 2) {
-        // Track 3: Enhanced Sequential Task Readout
-        console.log('[Morning Oracle] Track 3: Launching sequential task readout...');
-        playSequentialTaskSpeech();
-        const estDuration =
-          tasksToSpeakRef.current.length > 0 ? Math.max(12, tasksToSpeakRef.current.length * 6) : 6;
-        progressTimerRef.current = setInterval(() => {
-          setProgress((prev) => Math.min(prev + 1, estDuration));
-        }, 1000);
+        // Track 3: Play Personal Assistant Tasks Audio (with fallback)
+        console.log('[Morning Oracle] Track 3: Starting AI Assistant Tasks Briefing...');
+        playStage3TasksAudio();
       }
     },
-    [digestLang, stopCurrentAudio, playNewsSpeechFallback, playSequentialTaskSpeech, advanceToNextTrack]
+    [digestLang, stopCurrentAudio, playNewsSpeechFallback, playStage3TasksAudio, advanceToNextTrack]
   );
 
   // Handle modal open/close lifecycle
@@ -694,21 +745,21 @@ export function MorningPlayer({
             )}
           </div>
 
-          {/* Track 3 Live Spoken Task Highlighting List */}
+          {/* Track 3 Tasks Overview Cards */}
           {currentTrackIndex === 2 && tasksToSpeakRef.current.length > 0 && (
-            <div className="w-full max-h-28 overflow-y-auto space-y-1 text-left px-1 py-1 bg-oracle-dark/50 rounded-xl border border-oracle-border/60 text-xs">
+            <div className="w-full max-h-32 overflow-y-auto space-y-1 text-left px-1 py-1 bg-oracle-dark/50 rounded-xl border border-oracle-border/60 text-xs">
               {tasksToSpeakRef.current.map((task, idx) => (
                 <div
                   key={task.id}
                   className={`p-2 rounded-lg transition-all flex items-center justify-between ${
                     activeTaskIndex === idx
                       ? 'bg-oracle-cyan/20 border border-oracle-cyan/60 text-oracle-cyan font-medium shadow-cyan-glow'
-                      : 'text-oracle-muted bg-transparent'
+                      : 'text-oracle-muted bg-transparent hover:bg-oracle-card/50'
                   }`}
                 >
                   <div className="flex items-center space-x-2 truncate">
-                    <span className="font-mono text-[10px] opacity-75">#{idx + 1}</span>
-                    <span className="truncate">{task.text}</span>
+                    <span className="font-mono text-[10px] text-oracle-cyan opacity-80">#{idx + 1}</span>
+                    <span className="truncate text-gray-200">{task.text}</span>
                   </div>
                   {activeTaskIndex === idx && (
                     <Volume2 className="w-3.5 h-3.5 text-oracle-cyan animate-pulse shrink-0 ml-2" />
